@@ -1,0 +1,120 @@
+# Builds, signs and publishes a release whenever main is pushed with a new
+# version number in Cargo.toml. Installed copies of Mini Sync check the latest
+# release every 6 hours and offer the update in their tray menu.
+#
+# Needs one repository secret: RELEASE_SIGNING_KEY (see README, "Releasing").
+
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Is this a new version?
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      release: ${{ steps.v.outputs.release }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if gh release view "v$version" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "v$version is already released. Bump 'version' in Cargo.toml to publish an update."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Will release v$version"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: cargo test
+
+  build:
+    name: Build ${{ matrix.asset }}
+    needs: [version, test]
+    if: needs.version.outputs.release == 'true'
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bin: minisync.exe
+            asset: minisync-windows-x64.exe
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            bin: minisync
+            asset: minisync-macos-arm64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            bin: minisync
+            asset: minisync-macos-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup target add ${{ matrix.target }}
+      - run: cargo build --release --target ${{ matrix.target }}
+      - shell: bash
+        run: |
+          mkdir dist
+          cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "dist/${{ matrix.asset }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+
+  publish:
+    name: Sign and publish
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Sign
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          if [ -z "$RELEASE_SIGNING_KEY" ]; then
+            echo "::error::The RELEASE_SIGNING_KEY repository secret is missing (see README, Releasing)."
+            exit 1
+          fi
+          tool="cargo run --quiet --release --manifest-path tools/release-sign/Cargo.toml --"
+          $tool sign dist/minisync-*
+          for f in dist/minisync-windows-x64.exe dist/minisync-macos-arm64 dist/minisync-macos-x64; do
+            $tool verify "$(cat release-public-key.txt)" "$f"
+          done
+          (cd dist && sha256sum minisync-* > SHA256SUMS.txt)
+          ls -la dist
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v="${{ needs.version.outputs.version }}"
+          gh release create "v$v" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Mini Sync v$v" \
+            --generate-notes

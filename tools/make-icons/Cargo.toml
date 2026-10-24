@@ -1,0 +1,12 @@
+[package]
+name = "make-icons"
+version = "0.1.0"
+edition = "2021"
+description = "Turns assets/icon-source.png into the Windows .ico and macOS .icns used by minisync"
+publish = false
+
+[dependencies]
+anyhow = "1"
+icns = "0.3"
+ico = "0.3"
+image = { version = "0.25", default-features = false, features = ["png"] }

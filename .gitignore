@@ -1,0 +1,6 @@
+/target
+/tools/*/target
+
+# Never commit signing keys or device keys
+*signing-key*
+key.bin

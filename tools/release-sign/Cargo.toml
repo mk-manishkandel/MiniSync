@@ -1,0 +1,11 @@
+[package]
+name = "release-sign"
+version = "0.1.0"
+edition = "2021"
+description = "Creates the release signing key and signs release files for minisync's updater"
+publish = false
+
+[dependencies]
+anyhow = "1"
+ed25519-dalek = "2"
+getrandom = "0.2"
