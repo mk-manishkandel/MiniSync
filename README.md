@@ -18,6 +18,8 @@ scratch in Rust and keeps only what's needed for syncing between your own device
 ## Features
 
 - **Two-way sync** of one or more folders between any number of your devices
+- **You choose who gets what:** share each folder with only the devices you pick, each with
+  **read & write** or **read only** access
 - **Encrypted, trusted-only connections.** Each device has its own key, and devices only talk to IDs you added
 - **Finds your devices automatically** on the local network (or use a fixed IP)
 - **Runs in the background** with a tray / menu-bar icon, and starts at login
@@ -65,23 +67,48 @@ After the first setup, Mini Sync installs itself and updates on its own.
 
 Do this with both computers on the same Wi-Fi.
 
-1. **Open the downloaded file.** The setup window asks for:
-   - a **name** for this device (e.g. `office-pc`, `macbook`)
-   - the **folder to sync**: press Enter for the default `MiniSync` folder in your home folder
+1. **Open the downloaded file.** The setup window asks for a **name** for this device
+   (e.g. `office-pc`, `macbook`).
 2. It shows **this device's ID** (already copied to the clipboard).
 3. It asks for the **other device's ID**. Paste it and give that device a name.
    Send IDs to yourself (email, chat, notes) to copy them between computers.
-4. **Allow network access** when asked:
+4. It asks about a **folder**:
+   - on your **first** device: *Create a folder* (Enter = the `MiniSync` folder in your home folder),
+     then choose what the other device may do: **read & write** or **read only**
+   - on your **other** devices: *Join a folder*. You'll get an invitation (see below)
+5. **Allow network access** when asked:
    - Windows: firewall prompt → *Allow*
    - Mac: *Local Network* → *Allow*
-5. Done. It installs itself, runs in the background and starts at every login.
+6. Done. It installs itself, runs in the background and starts at every login.
+7. On the joining device, once both are connected: the header shows **✉ 1 folder invitation**.
+   Open the menu → **6 Invitations** → *Accept* → choose where to keep it.
 
-Each device must have **the other device's ID**, and synced folders must use the **same folder ID**
-on every device. The default folder ID `minisync` is used automatically, so if you keep the defaults
-everything matches.
+Each device must have **the other device's ID**. To check: the tray icon should say
+**"connected to …"**. Put a file in `MiniSync` and it shows up on the other device within seconds.
 
-To check: the tray icon should say **"connected to …"**. Put a file in `MiniSync` and it
-shows up on the other device within seconds.
+## Sharing and permissions
+
+Every folder has an **owner**: the device that added it. Only the owner decides which devices get
+the folder and what they may do:
+
+| Access | The device… |
+|---|---|
+| **Read & write** | gets the files, and its changes are synced back to everyone |
+| **Read only** | gets the files, but changes made there are **undone** (the edited copy is kept in its `.minisync-trash`) |
+| **No access** | doesn't get the folder at all (the default for new devices and folders) |
+
+- **Share or change access:** menu → **5 Share a folder / access** → pick a device → pick its access.
+  The device gets an invitation the first time; later changes apply as soon as it reconnects.
+- **Invitations:** menu → **6**. Accept (choose a location) or decline. Nothing is synced until you accept.
+- **Taking access away** stops syncing on that device. Its copy of the files is kept.
+- Devices sync a shared folder **through its owner**, so the owner must be on for changes to
+  travel between the other devices. This keeps the owner's rules enforced: a read-only device can't
+  slip changes in through another device.
+- Different devices can share different folders: e.g. *Work* with your laptop only, and *Photos*
+  read-only with a family computer.
+
+Upgrading from v0.2: existing folders stay shared read & write with the devices you already had.
+All devices need v0.3.0 or newer to talk to each other (they update automatically).
 
 ## Everyday use
 
@@ -101,30 +128,36 @@ If one is away, changes wait and sync when it's back.
 **Menu** (tray → *Open Mini Sync…*). Every question accepts **Enter / 0 = back**:
 
 ```
-  ╭───────────────────────────────╮
-  │  Mini Sync  v0.2.1            │
-  │  ● Running in the background  │
-  ╰───────────────────────────────╯
+  ╭────────────────────────────────────╮
+  │  Mini Sync  v0.3.0                 │
+  │  ● Running in the background       │
+  │  ✉ 1 folder invitation - choose 6  │
+  ╰────────────────────────────────────╯
 
   This device   office-pc
   Device ID     A4DQOBY-HA4DQOB-YHA4DQO-...
-  Folder        C:\Users\me\MiniSync  (ID: minisync)
-  Devices       macbook
+  Devices       laptop, family-mac
+  Folders       MiniSync  C:\Users\me\MiniSync
+                yours - laptop read & write, family-mac read only
+                Work  C:\Users\me\Work
+                from laptop - you have read & write
 
   DEVICES                          FOLDERS
     1  Copy this device's ID        4  Add a folder
-    2  Add or update a device       5  Remove a folder
-    3  Remove a device              6  Open synced folder
+    2  Add or update a device       5  Share a folder / access
+    3  Remove a device              6  Invitations (1 new)
+                                    7  Remove a folder
+                                    8  Open a synced folder
 
   APP                              SECURITY & UPDATES
-    7  View log                    10  Change this device's ID
-    8  Restart                     11  Uninstall
-    9  Stop until next login       12  Check for updates
+    9  View log                    12  Change this device's ID
+   10  Restart                     13  Uninstall
+   11  Stop until next login       14  Check for updates
 
     0  Close this window (syncing keeps running)
 ```
 
-When a newer version is out, the header also shows **↑ Update vX available - choose 12**.
+When a newer version is out, the header also shows **↑ Update vX available - choose 14**.
 
 ## Updates
 
@@ -136,7 +169,7 @@ When there is one, the tray shows **"Install update vX.Y.Z"**. One click and Min
    (unsigned or modified files are refused),
 3. swaps it in and restarts. Your settings, device ID and files are kept.
 
-You can also update from the menu (*12*) or with `minisync update`.
+You can also update from the menu (*14*) or with `minisync update`.
 
 ## How it works
 
@@ -180,7 +213,7 @@ folder being mistaken for "everything was deleted".
 | Settings, device key, log | `%APPDATA%\minisync\` | `~/Library/Application Support/minisync/` |
 | Start at login | Registry `HKCU\…\Run\MiniSync` | `~/Library/LaunchAgents/com.minisync.plist` |
 
-**Uninstall** (menu 11) removes the program, start-at-login, settings and device key. Synced files and
+**Uninstall** (menu 13) removes the program, start-at-login, settings and device key. Synced files and
 `.minisync-trash` are kept.
 
 ## Troubleshooting
@@ -188,7 +221,9 @@ folder being mistaken for "everything was deleted".
 | Log says | Fix |
 |---|---|
 | `unknown device XXXX… tried to connect` | That device has your ID but you don't have its ID yet → menu 2 |
-| `X shares folder "a" which is not configured here` | Folder IDs differ between devices → remove the folder (5) and add it again (4) with the **same ID** as the other device |
+| `PC invites you to the folder ...` | Open the menu → 6 Invitations → Accept |
+| `could not talk to X` | The other device runs an older Mini Sync. Update it (menu → 14) |
+| A device doesn't get a folder | On the folder's owner: menu → 5 → give that device access. Then accept the invitation on the device (6) |
 | `already running (port 22100 is in use)` | Only one copy runs per computer; use the tray icon |
 | nothing connects | Same Wi-Fi? Firewall / Local Network allowed? Try a fixed address: `minisync add-peer NAME ID --address 192.168.x.x:22100` |
 
@@ -202,7 +237,9 @@ minisync status | start | stop | update
 minisync id                    # this device's ID
 minisync add-peer NAME ID [--address IP:22100]   # same NAME replaces its ID
 minisync remove-peer NAME
-minisync add-folder ID PATH
+minisync add-folder PATH [--id ID]                 # a folder you own, shared with nobody yet
+minisync share FOLDER-ID DEVICE read-write|read-only|none
+minisync accept FOLDER-ID PATH | decline FOLDER-ID  # invitations (see `show`)
 minisync remove-folder ID      # files are kept
 minisync new-id                # new device ID
 minisync show                  # print settings

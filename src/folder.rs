@@ -9,7 +9,7 @@ use crate::scan::{self, Index};
 use crate::util;
 use anyhow::{anyhow, bail, Context, Result};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,6 +28,8 @@ pub struct Folder {
     index: Index,
     /// Latest file list each connected peer has told us about.
     remote: HashMap<DeviceId, HashMap<String, FileInfo>>,
+    /// Peers whose full file list we have received since they connected.
+    complete: HashSet<DeviceId>,
     me: u64,
 }
 
@@ -43,7 +45,7 @@ impl Folder {
     pub fn new(id: String, root: PathBuf, ignores: Vec<String>, index_path: PathBuf, hub: Arc<Hub>) -> Folder {
         let index = scan::load_index(&index_path);
         let me = hub.me.short();
-        Folder { id, root, ignores, index_path, hub, index, remote: HashMap::new(), me }
+        Folder { id, root, ignores, index_path, hub, index, remote: HashMap::new(), complete: HashSet::new(), me }
     }
 
     pub async fn run(mut self, mut events: mpsc::Receiver<FolderEvent>) {
@@ -61,8 +63,11 @@ impl Folder {
                     None => return,
                     Some(FolderEvent::Scan) => { self.scan().await; self.pull().await; }
                     Some(FolderEvent::PeerConnected(p)) => self.send_full_index(p).await,
-                    Some(FolderEvent::PeerDisconnected(p)) => { self.remote.remove(&p); }
-                    Some(FolderEvent::RemoteIndex(p, files)) => {
+                    Some(FolderEvent::PeerDisconnected(p)) => { self.remote.remove(&p); self.complete.remove(&p); }
+                    Some(FolderEvent::RemoteIndex(p, files, complete)) => {
+                        if complete {
+                            self.complete.insert(p);
+                        }
                         let known = self.remote.entry(p).or_default();
                         for f in files {
                             if util::safe_join(&self.root, &f.name).is_none() {
@@ -119,8 +124,13 @@ impl Folder {
         self.index = index;
         match result {
             Ok(changed) if !changed.is_empty() => {
+                let read_only = self.hub.rule(&self.id).and_then(|r| r.read_only_owner()).is_some();
                 for f in &changed {
-                    log::info!("[{}] local {}: {}", self.id, describe(f), f.name);
+                    if read_only {
+                        log::warn!("[{}] local {}: {} - this folder is read only, so it will be undone", self.id, describe(f), f.name);
+                    } else {
+                        log::info!("[{}] local {}: {}", self.id, describe(f), f.name);
+                    }
                 }
                 self.save();
                 self.broadcast(changed).await;
@@ -130,20 +140,27 @@ impl Folder {
         }
     }
 
+    fn may_send_to(&self, peer: &DeviceId) -> bool {
+        self.hub.rule(&self.id).is_some_and(|r| r.can_send_to(peer))
+    }
+
     async fn send_full_index(&self, peer: DeviceId) {
-        let files: Vec<FileInfo> = self.index.values().cloned().collect();
-        for batch in files.chunks(INDEX_BATCH) {
-            self.hub.send(peer, Message::Index { folder: self.id.clone(), files: batch.to_vec() }).await;
+        if !self.may_send_to(&peer) {
+            return;
         }
-        if files.is_empty() {
-            self.hub.send(peer, Message::Index { folder: self.id.clone(), files: vec![] }).await;
+        let files: Vec<FileInfo> = self.index.values().cloned().collect();
+        let batches: Vec<&[FileInfo]> = if files.is_empty() { vec![&[]] } else { files.chunks(INDEX_BATCH).collect() };
+        let last = batches.len() - 1;
+        for (i, batch) in batches.into_iter().enumerate() {
+            let msg = Message::Index { folder: self.id.clone(), files: batch.to_vec(), complete: i == last };
+            self.hub.send(peer, msg).await;
         }
     }
 
     async fn broadcast(&self, files: Vec<FileInfo>) {
-        for peer in self.hub.connected() {
+        for peer in self.hub.connected().into_iter().filter(|p| self.may_send_to(p)) {
             for batch in files.chunks(INDEX_BATCH) {
-                self.hub.send(peer, Message::Index { folder: self.id.clone(), files: batch.to_vec() }).await;
+                self.hub.send(peer, Message::Index { folder: self.id.clone(), files: batch.to_vec(), complete: false }).await;
             }
         }
     }
@@ -154,10 +171,18 @@ impl Folder {
         }
     }
 
-    fn decide(&self, r: &FileInfo) -> Option<Action> {
+    fn decide(&self, r: &FileInfo, read_only: bool) -> Option<Action> {
         let Some(l) = self.index.get(&r.name) else {
             return Some(if r.deleted { Action::Record(r.clone()) } else { Action::Apply });
         };
+        if read_only {
+            // The owner's copy always wins; a local edit is replaced (and kept in the trash).
+            return match (l.same_content(r), l.version == r.version) {
+                (true, true) => None,
+                (true, false) => Some(Action::Record(r.clone())),
+                (false, _) => Some(Action::Apply),
+            };
+        }
         match r.version.compare(&l.version) {
             Order::Equal | Order::Lesser => None,
             Order::Greater if l.same_content(r) => Some(Action::Record(r.clone())),
@@ -177,11 +202,13 @@ impl Folder {
         if !self.root.join(util::MARKER).exists() {
             return;
         }
+        let Some(rule) = self.hub.rule(&self.id) else { return };
+        let read_only = rule.read_only_owner();
         // Newest announced version of each name across all peers.
         let mut wanted: HashMap<String, (DeviceId, FileInfo)> = HashMap::new();
-        for (peer, files) in &self.remote {
+        for (peer, files) in self.remote.iter().filter(|(p, _)| rule.accepts_from(p)) {
             for f in files.values() {
-                if self.decide(f).is_none() {
+                if self.decide(f, read_only.is_some()).is_none() {
                     continue;
                 }
                 match wanted.get(&f.name) {
@@ -191,6 +218,10 @@ impl Folder {
                     }
                 }
             }
+        }
+        let mut changed = Vec::new();
+        if let Some(owner) = read_only {
+            self.remove_local_extras(owner);
         }
         if wanted.is_empty() {
             return;
@@ -204,10 +235,9 @@ impl Folder {
             })
         });
 
-        let mut changed = Vec::new();
         let mut needs_scan = false;
         for (peer, r) in todo {
-            let Some(action) = self.decide(&r) else { continue };
+            let Some(action) = self.decide(&r, read_only.is_some()) else { continue };
             let result = match action {
                 Action::Record(f) => {
                     self.index.insert(f.name.clone(), f.clone());
@@ -234,6 +264,45 @@ impl Folder {
         if needs_scan {
             self.scan().await;
         }
+    }
+
+    /// Read-only folder: files added here that the owner doesn't have are
+    /// moved to the trash. Only once the owner's full list has arrived, so a
+    /// file isn't mistaken for "extra" while the list is still coming in.
+    fn remove_local_extras(&mut self, owner: DeviceId) {
+        if !self.complete.contains(&owner) {
+            return;
+        }
+        let Some(theirs) = self.remote.get(&owner) else { return };
+        let mut extras: Vec<FileInfo> =
+            self.index.values().filter(|l| !theirs.contains_key(&l.name)).cloned().collect();
+        if extras.is_empty() {
+            return;
+        }
+        // Deepest first, so a folder's files go before the folder itself.
+        extras.sort_by(|a, b| b.name.cmp(&a.name));
+        for l in extras {
+            if !l.deleted {
+                if !self.disk_matches_index(&l.name) {
+                    continue; // changed again since the last scan; next round
+                }
+                let Some(path) = util::safe_join(&self.root, &l.name) else { continue };
+                let result = match l.kind {
+                    Kind::File => self.trash(&path, &l.name),
+                    // Only if empty: anything left inside (e.g. ignored files) stays.
+                    Kind::Dir => std::fs::remove_dir(&path).map_err(Into::into),
+                };
+                match result {
+                    Ok(()) => log::warn!("[{}] removed {} - added here, but this folder is read only (see {})", self.id, l.name, util::TRASH_DIR),
+                    Err(e) => {
+                        log::debug!("[{}] {}: {e:#}", self.id, l.name);
+                        continue;
+                    }
+                }
+            }
+            self.index.remove(&l.name);
+        }
+        self.save();
     }
 
     /// True if what is on disk is exactly what our index says (so overwriting

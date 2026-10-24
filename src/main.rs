@@ -16,8 +16,8 @@ mod util;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use config::{default_ignores, Config, DeviceId, FolderConfig, Home, PeerConfig};
-use net::{FolderEvent, FolderHandle, Hub};
+use config::{Access, Config, DeviceId, FolderConfig, Home, PeerConfig};
+use net::{FolderEvent, FolderHandle, Hub, Rule};
 use notify::{RecursiveMode, Watcher};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -51,8 +51,31 @@ enum Cmd {
     },
     /// Print this device's ID (give it to your other devices)
     Id,
-    /// Share a folder. Use the same ID on every device.
-    AddFolder { id: String, path: PathBuf },
+    /// Add a folder owned by this device (shared with nobody until you use `share`)
+    AddFolder {
+        path: PathBuf,
+        /// Folder ID (default: generated from the folder's name)
+        #[arg(long)]
+        id: Option<String>,
+    },
+    /// Give a device access to a folder you own: read-write, read-only or none
+    Share {
+        /// Folder ID (see `show`)
+        folder: String,
+        /// Device name
+        device: String,
+        #[arg(value_parser = ["read-write", "read-only", "none"])]
+        access: String,
+    },
+    /// Accept an invitation to a folder from another device
+    Accept {
+        /// Folder ID from the invitation (see `show`)
+        folder: String,
+        /// Where to keep the folder on this device
+        path: PathBuf,
+    },
+    /// Decline an invitation
+    Decline { folder: String },
     /// Trust another of your devices
     AddPeer {
         name: String,
@@ -130,20 +153,55 @@ fn real_main(cli: Cli, background: bool) -> Result<()> {
             }
             let key = home.load_or_create_key()?;
             let name = name.unwrap_or_else(default_device_name);
-            home.save_config(&Config { device_name: name, listen_port: port, folders: vec![], peers: vec![] })?;
+            home.save_config(&Config::new(name, port))?;
             println!("Created {}", home.config_path().display());
             println!("This device's ID:\n\n    {}\n", key.public);
         }
         Cmd::Id => println!("{}", home.load_or_create_key()?.public),
-        Cmd::AddFolder { id, path } => {
+        Cmd::AddFolder { path, id } => {
             let mut cfg = home.load_config()?;
-            if cfg.folders.iter().any(|f| f.id == id) {
-                bail!("folder {id:?} already exists");
+            let mut folder = FolderConfig::new_own(absolute(path)?);
+            if let Some(id) = id {
+                folder.id = id;
             }
-            let path = absolute(path)?;
-            cfg.folders.push(FolderConfig { id: id.clone(), path: path.clone(), ignore: default_ignores() });
+            if cfg.folders.iter().any(|f| f.id == folder.id) {
+                bail!("folder {:?} already exists", folder.id);
+            }
+            println!("Added {} as folder {:?}. Share it with `minisync share {} DEVICE read-write`.", folder.path.display(), folder.id, folder.id);
+            cfg.folders.push(folder);
             home.save_config(&cfg)?;
-            println!("Sharing {} as folder {id:?}", path.display());
+        }
+        Cmd::Share { folder, device, access } => {
+            let mut cfg = home.load_config()?;
+            let peer = cfg.peers.iter().find(|p| p.name == device).with_context(|| format!("no device named {device:?}"))?;
+            let peer_id = DeviceId::parse(&peer.id)?;
+            let f = cfg.folders.iter_mut().find(|f| f.id == folder).with_context(|| format!("no folder with ID {folder:?}"))?;
+            if !f.is_mine() {
+                bail!("only the device that owns {folder:?} can change who has access");
+            }
+            let access = match access.as_str() {
+                "read-write" => Some(Access::ReadWrite),
+                "read-only" => Some(Access::ReadOnly),
+                _ => None,
+            };
+            f.set_share(&peer_id, access);
+            home.save_config(&cfg)?;
+            println!("{device}: {}. Run `minisync stop` then `minisync start` to apply.", access.map_or("no access", |a| a.label()));
+        }
+        Cmd::Accept { folder, path } => {
+            let mut cfg = home.load_config()?;
+            let inv = cfg.invites.iter().find(|i| i.folder == folder).cloned().with_context(|| format!("no invitation for {folder:?}"))?;
+            let path = absolute(path)?;
+            accept_invite(&mut cfg, &inv, path.clone())?;
+            home.save_config(&cfg)?;
+            println!("Joined {:?} at {} ({}). Run `minisync stop` then `minisync start` to apply.", inv.label, path.display(), inv.access.label());
+        }
+        Cmd::Decline { folder } => {
+            let mut cfg = home.load_config()?;
+            let inv = cfg.invites.iter_mut().find(|i| i.folder == folder).with_context(|| format!("no invitation for {folder:?}"))?;
+            inv.declined = true;
+            home.save_config(&cfg)?;
+            println!("Declined.");
         }
         Cmd::AddPeer { name, id, address } => {
             let mut cfg = home.load_config()?;
@@ -152,10 +210,9 @@ fn real_main(cli: Cli, background: bool) -> Result<()> {
                 bail!("that is this device's own ID");
             }
             // Same name or same ID replaces the old entry (e.g. after the other device got a new ID).
-            cfg.peers.retain(|p| DeviceId::parse(&p.id).ok() != Some(parsed) && p.name != name);
-            cfg.peers.push(PeerConfig { name: name.clone(), id: parsed.to_string(), addresses: address });
+            cfg.upsert_peer(PeerConfig { name: name.clone(), id: parsed.to_string(), addresses: address });
             home.save_config(&cfg)?;
-            println!("Trusting {name}");
+            println!("Trusting {name}. It sees none of your folders until you share one with it.");
         }
         Cmd::RemoveFolder { id } => {
             let mut cfg = home.load_config()?;
@@ -320,7 +377,41 @@ async fn run(home: Home, listener: std::net::TcpListener, status: Option<Arc<std
         receivers.push((f.clone(), tx, rx));
     }
 
-    let hub = Arc::new(Hub::new(key, cfg.device_name.clone(), cfg.listen_port, peers, handles));
+    let rules: HashMap<String, Rule> = cfg
+        .folders
+        .iter()
+        .map(|f| {
+            let shares = f
+                .shared_with
+                .iter()
+                .filter_map(|s| DeviceId::parse(&s.device).ok().map(|d| (d, s.access)))
+                .filter(|(d, _)| peers.contains_key(d))
+                .collect();
+            (f.id.clone(), Rule { owner: f.owner_id(), access: f.access, shares, label: f.label() })
+        })
+        .collect();
+    for f in &cfg.folders {
+        match f.owner_id() {
+            Some(o) => log::info!("[{}] {} - from {}, {}", f.id, f.path.display(), cfg.peer_name(&o.to_string()), f.access.label()),
+            None if f.shared_with.is_empty() => log::info!("[{}] {} - yours, not shared with any device yet", f.id, f.path.display()),
+            None => {
+                let list: Vec<String> =
+                    f.shared_with.iter().map(|s| format!("{} ({})", cfg.peer_name(&s.device), s.access.label())).collect();
+                log::info!("[{}] {} - yours, shared with {}", f.id, f.path.display(), list.join(", "));
+            }
+        }
+    }
+
+    let hub = Arc::new(Hub::new(
+        key,
+        cfg.device_name.clone(),
+        cfg.listen_port,
+        peers,
+        handles,
+        rules,
+        home.dir.clone(),
+        cfg.pending_invites(),
+    ));
 
     let mut watchers = Vec::new();
     for (f, tx, rx) in receivers {
@@ -341,11 +432,17 @@ async fn run(home: Home, listener: std::net::TcpListener, status: Option<Arc<std
             loop {
                 let mut names: Vec<String> = hub.connected().iter().map(|id| hub.peer_name(id)).collect();
                 names.sort();
-                *status.lock().unwrap() = if names.is_empty() {
-                    "waiting for your devices".into()
+                let mut text = if names.is_empty() {
+                    "waiting for your devices".to_string()
                 } else {
                     format!("connected to {}", names.join(", "))
                 };
+                match hub.invites.load(std::sync::atomic::Ordering::Relaxed) {
+                    0 => {}
+                    1 => text.push_str(" - 1 folder invitation"),
+                    n => text.push_str(&format!(" - {n} folder invitations")),
+                }
+                *status.lock().unwrap() = text;
                 tokio::time::sleep(Duration::from_secs(3)).await;
             }
         });
@@ -382,6 +479,26 @@ fn watch(root: &PathBuf, tx: mpsc::Sender<FolderEvent>) -> Result<notify::Recomm
         }
     });
     Ok(watcher)
+}
+
+/// Joins a folder another device shared with us. Used by the menu and `accept`.
+pub fn accept_invite(cfg: &mut Config, inv: &config::Invite, path: PathBuf) -> Result<()> {
+    if cfg.folders.iter().any(|f| f.id == inv.folder) {
+        bail!("you already have this folder");
+    }
+    if let Some(f) = cfg.folders.iter().find(|f| f.path == path) {
+        bail!("{} is already used by another synced folder ({})", path.display(), f.label());
+    }
+    cfg.folders.push(FolderConfig {
+        id: inv.folder.clone(),
+        path,
+        ignore: config::default_ignores(),
+        owner: Some(inv.from.clone()),
+        access: inv.access,
+        shared_with: vec![],
+    });
+    cfg.invites.retain(|i| !(i.from == inv.from && i.folder == inv.folder));
+    Ok(())
 }
 
 fn absolute(path: PathBuf) -> Result<PathBuf> {

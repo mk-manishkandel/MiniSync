@@ -2,15 +2,15 @@
 //! pinned static keys, standing in for Syncthing's TLS + device ID check),
 //! LAN discovery by UDP broadcast, and the connection registry ("hub").
 
-use crate::config::{DeviceId, Keypair, NOISE_PARAMS};
-use crate::proto::{self, FileInfo, Message};
+use crate::config::{Access, DeviceId, Home, Invite, Keypair, NOISE_PARAMS};
+use crate::proto::{self, FileInfo, Message, Offer};
 use crate::util;
 use anyhow::{anyhow, bail, Result};
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -28,12 +28,50 @@ pub enum FolderEvent {
     Scan,
     PeerConnected(DeviceId),
     PeerDisconnected(DeviceId),
-    RemoteIndex(DeviceId, Vec<FileInfo>),
+    /// Files from a peer; the flag marks the end of a full list.
+    RemoteIndex(DeviceId, Vec<FileInfo>, bool),
 }
 
 pub struct FolderHandle {
     pub root: PathBuf,
     pub events: mpsc::Sender<FolderEvent>,
+}
+
+/// Who a folder is synced with, and how. Kept in the hub so it can change
+/// while running (the owner may change our access at any time).
+#[derive(Debug, Clone)]
+pub struct Rule {
+    /// None = this device owns the folder.
+    pub owner: Option<DeviceId>,
+    /// For a joined folder: what the owner allows us.
+    pub access: Access,
+    /// For an owned folder: who has access.
+    pub shares: HashMap<DeviceId, Access>,
+    pub label: String,
+}
+
+impl Rule {
+    /// May `peer` get this folder's files from us?
+    pub fn can_send_to(&self, peer: &DeviceId) -> bool {
+        match self.owner {
+            None => self.shares.contains_key(peer),
+            // Joined folders sync only with their owner, and only if we may write.
+            Some(o) => o == *peer && self.access == Access::ReadWrite,
+        }
+    }
+
+    /// Do we take changes from `peer`?
+    pub fn accepts_from(&self, peer: &DeviceId) -> bool {
+        match self.owner {
+            None => self.shares.get(peer) == Some(&Access::ReadWrite),
+            Some(o) => o == *peer,
+        }
+    }
+
+    /// For a folder joined read-only: its owner (local edits are undone).
+    pub fn read_only_owner(&self) -> Option<DeviceId> {
+        self.owner.filter(|_| self.access == Access::ReadOnly)
+    }
 }
 
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Vec<u8>, String>>>>>;
@@ -52,6 +90,10 @@ pub struct Hub {
     listen_port: u16,
     peers: HashMap<DeviceId, (String, Vec<String>)>,
     pub folders: HashMap<String, FolderHandle>,
+    rules: Mutex<HashMap<String, Rule>>,
+    home_dir: PathBuf,
+    /// Invitations waiting for an answer (shown in the tray).
+    pub invites: AtomicUsize,
     conns: Mutex<HashMap<DeviceId, Conn>>,
     discovered: Mutex<HashMap<DeviceId, SocketAddr>>,
     dial_now: tokio::sync::Notify,
@@ -65,6 +107,9 @@ impl Hub {
         listen_port: u16,
         peers: HashMap<DeviceId, (String, Vec<String>)>,
         folders: HashMap<String, FolderHandle>,
+        rules: HashMap<String, Rule>,
+        home_dir: PathBuf,
+        invites: usize,
     ) -> Hub {
         Hub {
             me: key.public,
@@ -73,6 +118,9 @@ impl Hub {
             listen_port,
             peers,
             folders,
+            rules: Mutex::new(rules),
+            home_dir,
+            invites: AtomicUsize::new(invites),
             conns: Mutex::new(HashMap::new()),
             discovered: Mutex::new(HashMap::new()),
             dial_now: tokio::sync::Notify::new(),
@@ -82,6 +130,89 @@ impl Hub {
 
     pub fn peer_name(&self, id: &DeviceId) -> String {
         self.peers.get(id).map(|p| p.0.clone()).unwrap_or_else(|| format!("{id:?}"))
+    }
+
+    pub fn rule(&self, folder: &str) -> Option<Rule> {
+        self.rules.lock().unwrap().get(folder).cloned()
+    }
+
+    /// The folders we own and share with `peer`.
+    fn offers_for(&self, peer: &DeviceId) -> Vec<Offer> {
+        let rules = self.rules.lock().unwrap();
+        let mut offers: Vec<Offer> = rules
+            .iter()
+            .filter(|(_, r)| r.owner.is_none())
+            .filter_map(|(id, r)| r.shares.get(peer).map(|a| Offer { folder: id.clone(), label: r.label.clone(), access: *a }))
+            .collect();
+        offers.sort_by(|a, b| a.folder.cmp(&b.folder));
+        offers
+    }
+
+    /// Applies what `peer` says it shares with us: new invitations, changed
+    /// access to folders we joined from it, and folders it stopped sharing.
+    fn handle_offers(&self, peer: DeviceId, offers: &[Offer]) -> Result<()> {
+        let home = Home { dir: self.home_dir.clone() };
+        let mut cfg = home.load_config()?;
+        let from = peer.to_string();
+        let name = self.peer_name(&peer);
+        let mut changed = false;
+        let mut revoked = Vec::new();
+
+        for f in cfg.folders.iter_mut().filter(|f| f.owner_id() == Some(peer)) {
+            match offers.iter().find(|o| o.folder == f.id) {
+                Some(o) if o.access != f.access => {
+                    log::warn!("[{}] {name} changed your access to {}", f.id, o.access.label());
+                    f.access = o.access;
+                    if let Some(r) = self.rules.lock().unwrap().get_mut(&f.id) {
+                        r.access = o.access;
+                    }
+                    changed = true;
+                }
+                Some(_) => {}
+                None => revoked.push(f.id.clone()),
+            }
+        }
+        for id in revoked {
+            log::warn!("[{id}] {name} stopped sharing this folder with you; it no longer syncs (files are kept)");
+            self.rules.lock().unwrap().remove(&id);
+            home.remove_folder(&mut cfg, &id)?;
+            changed = true;
+        }
+
+        for o in offers {
+            if cfg.folders.iter().any(|f| f.id == o.folder) {
+                continue; // already joined (or our own folder with the same ID)
+            }
+            match cfg.invites.iter_mut().find(|i| i.from == from && i.folder == o.folder) {
+                Some(i) => {
+                    if i.access != o.access || i.label != o.label {
+                        i.access = o.access;
+                        i.label = o.label.clone();
+                        changed = true;
+                    }
+                }
+                None => {
+                    log::info!("{name} invites you to the folder {:?} ({}); accept it in the menu", o.label, o.access.label());
+                    cfg.invites.push(Invite {
+                        from: from.clone(),
+                        folder: o.folder.clone(),
+                        label: o.label.clone(),
+                        access: o.access,
+                        declined: false,
+                    });
+                    changed = true;
+                }
+            }
+        }
+        let before = cfg.invites.len();
+        cfg.invites.retain(|i| i.from != from || offers.iter().any(|o| o.folder == i.folder));
+        changed |= cfg.invites.len() != before;
+
+        if changed {
+            home.save_config(&cfg)?;
+        }
+        self.invites.store(cfg.pending_invites(), Ordering::Relaxed);
+        Ok(())
     }
 
     pub fn connected(&self) -> Vec<DeviceId> {
@@ -284,16 +415,22 @@ pub async fn run_conn(hub: Arc<Hub>, stream: TcpStream, initiator: bool) {
 
     let _ = tx
         .send(Message::Hello {
+            protocol: proto::PROTOCOL,
             device_name: hub.device_name.clone(),
-            folders: hub.folders.keys().cloned().collect(),
+            offers: hub.offers_for(&peer),
         })
         .await;
     drop(tx);
     hub.notify_folders(|| FolderEvent::PeerConnected(peer)).await;
 
+    let mut got_hello = false;
     loop {
         let msg = match tokio::time::timeout(IDLE_TIMEOUT, recv_msg(&mut r, &noise)).await {
             Ok(Ok(m)) => m,
+            Ok(Err(e)) if !got_hello => {
+                log::warn!("could not talk to {name} ({e}); make sure both devices run the latest Mini Sync");
+                break;
+            }
             Ok(Err(e)) => {
                 log::debug!("read from {name}: {e}");
                 break;
@@ -304,22 +441,36 @@ pub async fn run_conn(hub: Arc<Hub>, stream: TcpStream, initiator: bool) {
             }
         };
         match msg {
-            Message::Hello { device_name, folders } => {
-                log::info!("{name} calls itself {device_name:?}, shares folders {folders:?}");
-                for f in folders.iter().filter(|f| !hub.folders.contains_key(*f)) {
-                    log::warn!("{name} shares folder {f:?} which is not configured here");
+            Message::Hello { protocol, device_name, offers } => {
+                if protocol != proto::PROTOCOL {
+                    log::warn!("{name} runs a different Mini Sync version; update both devices");
+                    break;
+                }
+                got_hello = true;
+                let list: Vec<String> = offers.iter().map(|o| format!("{} ({})", o.label, o.access.label())).collect();
+                log::info!("{name} calls itself {device_name:?}, shares with you: {list:?}");
+                if let Err(e) = hub.handle_offers(peer, &offers) {
+                    log::error!("saving folders shared by {name}: {e:#}");
                 }
             }
-            Message::Index { folder, files } => match hub.folders.get(&folder) {
-                Some(f) => {
-                    let _ = f.events.send(FolderEvent::RemoteIndex(peer, files)).await;
+            Message::Index { folder, files, complete } => {
+                match (hub.folders.get(&folder), hub.rule(&folder)) {
+                    (Some(f), Some(rule)) if rule.accepts_from(&peer) => {
+                        let _ = f.events.send(FolderEvent::RemoteIndex(peer, files, complete)).await;
+                    }
+                    _ => log::debug!("ignoring index for {folder:?} from {name} (not allowed)"),
                 }
-                None => log::debug!("index for unknown folder {folder:?}"),
-            },
+            }
             Message::Request { id, folder, name: file, offset, size } => {
                 let hub = hub.clone();
                 tokio::spawn(async move {
-                    let data = serve_request(&hub, &folder, &file, offset, size).await;
+                    let allowed = hub.rule(&folder).is_some_and(|r| r.can_send_to(&peer));
+                    let data = if allowed {
+                        serve_request(&hub, &folder, &file, offset, size).await
+                    } else {
+                        log::warn!("refused {} a file from {folder:?}: no access", hub.peer_name(&peer));
+                        Err("no access to this folder".into())
+                    };
                     hub.send(peer, Message::Response { id, data }).await;
                 });
             }

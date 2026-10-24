@@ -50,8 +50,13 @@ impl std::fmt::Debug for DeviceId {
     }
 }
 
+/// Settings layout version. 0 = before folder sharing rules existed.
+pub const CONFIG_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    #[serde(default)]
+    pub version: u32,
     pub device_name: String,
     #[serde(default = "default_port")]
     pub listen_port: u16,
@@ -59,6 +64,27 @@ pub struct Config {
     pub folders: Vec<FolderConfig>,
     #[serde(default)]
     pub peers: Vec<PeerConfig>,
+    /// Folders other devices have offered to share with this one.
+    #[serde(default)]
+    pub invites: Vec<Invite>,
+}
+
+/// What a device may do with a shared folder.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Access {
+    #[default]
+    ReadWrite,
+    ReadOnly,
+}
+
+impl Access {
+    pub fn label(self) -> &'static str {
+        match self {
+            Access::ReadWrite => "read & write",
+            Access::ReadOnly => "read only",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,6 +95,145 @@ pub struct FolderConfig {
     /// Simple patterns matched against file/dir names: exact name, "*.ext", "prefix*".
     #[serde(default = "default_ignores")]
     pub ignore: Vec<String>,
+    /// The device that shared this folder with us. None = this device owns it.
+    /// Only the owner decides who gets the folder and with what access.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// For a folder we joined: what the owner allows this device to do.
+    #[serde(default)]
+    pub access: Access,
+    /// For a folder we own: the devices it is shared with.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shared_with: Vec<Share>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Share {
+    pub device: String,
+    pub access: Access,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Invite {
+    /// Device ID of the folder's owner.
+    pub from: String,
+    pub folder: String,
+    /// The folder's name on the owner's device.
+    pub label: String,
+    pub access: Access,
+    #[serde(default)]
+    pub declined: bool,
+}
+
+impl FolderConfig {
+    /// A new folder owned by this device, shared with nobody yet.
+    pub fn new_own(path: PathBuf) -> FolderConfig {
+        let id = new_folder_id(&path);
+        FolderConfig { id, path, ignore: default_ignores(), owner: None, access: Access::ReadWrite, shared_with: vec![] }
+    }
+
+    pub fn owner_id(&self) -> Option<DeviceId> {
+        self.owner.as_deref().and_then(|s| DeviceId::parse(s).ok())
+    }
+
+    pub fn is_mine(&self) -> bool {
+        self.owner.is_none()
+    }
+
+    pub fn share_for(&self, dev: &DeviceId) -> Option<Access> {
+        self.shared_with
+            .iter()
+            .find(|s| DeviceId::parse(&s.device).ok().as_ref() == Some(dev))
+            .map(|s| s.access)
+    }
+
+    /// Gives `dev` this access (None = no access).
+    pub fn set_share(&mut self, dev: &DeviceId, access: Option<Access>) {
+        self.shared_with.retain(|s| DeviceId::parse(&s.device).ok().as_ref() != Some(dev));
+        if let Some(access) = access {
+            self.shared_with.push(Share { device: dev.to_string(), access });
+        }
+    }
+
+    /// Display name: the folder's own name.
+    pub fn label(&self) -> String {
+        self.path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| self.path.display().to_string())
+    }
+}
+
+/// "My Photos" -> "my-photos-K3J9QX": readable, and unique so folders shared
+/// from different devices never collide.
+pub fn new_folder_id(path: &Path) -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let slug: String = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write(path.to_string_lossy().as_bytes());
+    h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());
+    let tag = &BASE32_NOPAD.encode(&h.finish().to_be_bytes())[..6];
+    if slug.is_empty() {
+        format!("folder-{tag}")
+    } else {
+        format!("{slug}-{tag}")
+    }
+}
+
+impl Config {
+    pub fn new(device_name: String, listen_port: u16) -> Config {
+        Config { version: CONFIG_VERSION, device_name, listen_port, folders: vec![], peers: vec![], invites: vec![] }
+    }
+
+    /// Adds a trusted device, or replaces the one with the same name or ID.
+    /// If an existing device got a new ID, its folder permissions move along.
+    /// Returns true if an existing device was replaced.
+    pub fn upsert_peer(&mut self, peer: PeerConfig) -> bool {
+        let new_id = DeviceId::parse(&peer.id).ok();
+        let old: Vec<String> = self
+            .peers
+            .iter()
+            .filter(|p| p.name == peer.name || DeviceId::parse(&p.id).ok() == new_id)
+            .map(|p| p.id.clone())
+            .collect();
+        self.peers.retain(|p| !old.contains(&p.id));
+        let new = peer.id.clone();
+        for f in &mut self.folders {
+            for s in &mut f.shared_with {
+                if old.contains(&s.device) {
+                    s.device = new.clone();
+                }
+            }
+            if f.owner.as_ref().is_some_and(|o| old.contains(o)) {
+                f.owner = Some(new.clone());
+            }
+        }
+        self.peers.push(peer);
+        !old.is_empty()
+    }
+
+    pub fn peer_name(&self, id: &str) -> String {
+        let parsed = DeviceId::parse(id).ok();
+        self.peers
+            .iter()
+            .find(|p| DeviceId::parse(&p.id).ok() == parsed)
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| format!("unknown device {}", &id[..id.len().min(7)]))
+    }
+
+    pub fn pending_invites(&self) -> usize {
+        self.invites.iter().filter(|i| !i.declined).count()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,6 +311,17 @@ impl Home {
             .position(|p| p.name == name_or_id || (as_id.is_some() && DeviceId::parse(&p.id).ok() == as_id))
             .with_context(|| format!("no device named {name_or_id:?}"))?;
         let peer = cfg.peers.remove(pos);
+        // Forget everything about it: its access to our folders, its
+        // invitations, and the folders we joined from it (files are kept).
+        for f in &mut cfg.folders {
+            f.shared_with.retain(|s| s.device != peer.id);
+        }
+        cfg.invites.retain(|i| i.from != peer.id);
+        let joined: Vec<String> =
+            cfg.folders.iter().filter(|f| f.owner.as_ref() == Some(&peer.id)).map(|f| f.id.clone()).collect();
+        for id in joined {
+            self.remove_folder(cfg, &id)?;
+        }
         self.save_config(cfg)?;
         Ok(peer)
     }
@@ -154,9 +330,19 @@ impl Home {
         let path = self.config_path();
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {} (run `minisync init` first)", path.display()))?;
-        let cfg: Config = toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        let mut cfg: Config = toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
         for p in &cfg.peers {
             DeviceId::parse(&p.id).with_context(|| format!("peer {:?}", p.name))?;
+        }
+        if cfg.version < CONFIG_VERSION {
+            // Before sharing rules existed every folder went to every device
+            // with full access. Keep it that way for existing setups.
+            for f in cfg.folders.iter_mut().filter(|f| f.owner.is_none() && f.shared_with.is_empty()) {
+                f.shared_with =
+                    cfg.peers.iter().map(|p| Share { device: p.id.clone(), access: Access::ReadWrite }).collect();
+            }
+            cfg.version = CONFIG_VERSION;
+            self.save_config(&cfg)?;
         }
         Ok(cfg)
     }

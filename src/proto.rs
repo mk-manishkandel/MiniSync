@@ -1,6 +1,7 @@
 //! Wire messages and file metadata. A heavily reduced version of Syncthing's
 //! Block Exchange Protocol: Hello, Index, Request, Response, Ping.
 
+use crate::config::Access;
 use serde::{Deserialize, Serialize};
 
 /// Version vector: one counter per device that has modified the file.
@@ -111,11 +112,25 @@ impl FileInfo {
     }
 }
 
+/// Bumped whenever messages change in a way older versions can't read.
+pub const PROTOCOL: u32 = 2;
+
+/// A folder the sender owns and shares with the receiver.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Offer {
+    pub folder: String,
+    pub label: String,
+    pub access: Access,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Message {
-    Hello { device_name: String, folders: Vec<String> },
+    /// First message on every connection. `offers` lists the folders the
+    /// sender owns and shares with the receiver (the owner's word is final).
+    Hello { protocol: u32, device_name: String, offers: Vec<Offer> },
     /// Full or partial list of files; the receiver merges it either way.
-    Index { folder: String, files: Vec<FileInfo> },
+    /// `complete` marks the last batch of a full list.
+    Index { folder: String, files: Vec<FileInfo>, complete: bool },
     Request { id: u64, folder: String, name: String, offset: u64, size: u32 },
     Response { id: u64, data: Result<Vec<u8>, String> },
     Ping,
