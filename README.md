@@ -101,13 +101,30 @@ If one is away, changes wait and sync when it's back.
 **Menu** (tray → *Open Mini Sync…*). Every question accepts **Enter / 0 = back**:
 
 ```
- 1) Copy this device's ID            7) View log
- 2) Add or update a device           8) Restart
- 3) Remove a device                  9) Stop (until next login)
- 4) Add another folder              10) Change this device's ID
- 5) Remove a folder (files stay)    11) Uninstall
- 6) Open synced folder              12) Check for updates
+  ╭───────────────────────────────╮
+  │  Mini Sync  v0.2.1            │
+  │  ● Running in the background  │
+  ╰───────────────────────────────╯
+
+  This device   office-pc
+  Device ID     A4DQOBY-HA4DQOB-YHA4DQO-...
+  Folder        C:\Users\me\MiniSync  (ID: minisync)
+  Devices       macbook
+
+  DEVICES                          FOLDERS
+    1  Copy this device's ID        4  Add a folder
+    2  Add or update a device       5  Remove a folder
+    3  Remove a device              6  Open synced folder
+
+  APP                              SECURITY & UPDATES
+    7  View log                    10  Change this device's ID
+    8  Restart                     11  Uninstall
+    9  Stop until next login       12  Check for updates
+
+    0  Close this window (syncing keeps running)
 ```
+
+When a newer version is out, the header also shows **↑ Update vX available - choose 12**.
 
 ## Updates
 
@@ -236,6 +253,7 @@ The command prints the public key; put it in `release-public-key.txt`.
 src/
   main.rs      command line, startup, single-instance lock
   menu.rs      setup wizard and menu
+  ui.rs        terminal colours and layout for the menu
   tray.rs      tray / menu-bar icon
   service.rs   install, start-at-login, start/stop
   update.rs    update check, signature verification, self-replace

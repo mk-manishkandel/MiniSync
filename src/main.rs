@@ -10,6 +10,7 @@ mod scan;
 mod service;
 #[cfg(any(windows, target_os = "macos"))]
 mod tray;
+mod ui;
 mod update;
 mod util;
 
