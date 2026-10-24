@@ -197,7 +197,10 @@ When a newer version is out, the header also shows **↑ Update vX available - c
 ## Updates
 
 Installed copies check GitHub for a new release **a minute after starting and every 6 hours**.
-When there is one, the tray shows **"Install update vX.Y.Z"**. One click and Mini Sync:
+When there is one, a **popup** asks *"Mini Sync vX.Y.Z is available. Install it now?"*, even if
+the app isn't open. Choose **Yes** (Mac: **Install**) to update right away, or **No** (Mac: **Later**)
+to install it later from the tray item **"Install update vX.Y.Z"**. Each new version is asked about
+only once. On install, Mini Sync:
 
 1. downloads the file for your platform from the GitHub release,
 2. **verifies its Ed25519 signature** against the public key built into the app
