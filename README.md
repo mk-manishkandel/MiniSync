@@ -9,6 +9,19 @@
   Windows &amp; macOS · one small program · no account, no cloud, no browser.
 </p>
 
+<p align="center">
+  <a href="https://github.com/mk-manishkandel/MiniSync/releases/latest/download/minisync-windows-x64.exe"><b>⬇ Download for Windows</b></a>
+  &nbsp;·&nbsp;
+  <a href="https://github.com/mk-manishkandel/MiniSync/releases/latest/download/minisync-macos-arm64"><b>⬇ Mac (Apple chip)</b></a>
+  &nbsp;·&nbsp;
+  <a href="https://github.com/mk-manishkandel/MiniSync/releases/latest/download/minisync-macos-x64"><b>⬇ Mac (Intel)</b></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/mk-manishkandel/MiniSync/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/mk-manishkandel/MiniSync?label=latest%20version"></a>
+  <a href="https://github.com/mk-manishkandel/MiniSync/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/mk-manishkandel/MiniSync/total"></a>
+</p>
+
 ---
 
 Mini Sync is a small, personal take on [Syncthing](https://syncthing.net/): put files in the
@@ -32,15 +45,21 @@ scratch in Rust and keeps only what's needed for syncing between your own device
 
 ## Download
 
-Get the latest version from **[Releases](https://github.com/mk-manishkandel/MiniSync/releases/latest)**:
+Click the link for your computer. It always downloads the newest version:
 
-| Computer | File |
+| Computer | Download |
 |---|---|
-| Windows 10/11 (64-bit) | `minisync-windows-x64.exe` |
-| Mac with Apple chip (M1/M2/M3/M4) | `minisync-macos-arm64` |
-| Mac with Intel chip | `minisync-macos-x64` |
+| Windows 10/11 (64-bit) | **[minisync-windows-x64.exe](https://github.com/mk-manishkandel/MiniSync/releases/latest/download/minisync-windows-x64.exe)** |
+| Mac with Apple chip (M1/M2/M3/M4) | **[minisync-macos-arm64](https://github.com/mk-manishkandel/MiniSync/releases/latest/download/minisync-macos-arm64)** |
+| Mac with Intel chip | **[minisync-macos-x64](https://github.com/mk-manishkandel/MiniSync/releases/latest/download/minisync-macos-x64)** |
 
-That one file is the whole app.
+That one file is the whole app: no installer needed. Open it and the setup starts (see [Set up](#set-up-on-every-device)).
+
+Not sure which Mac you have? Apple menu → **About This Mac**: *Chip: Apple M…* means Apple chip,
+*Processor: Intel…* means Intel.
+
+Older versions, signatures (`.sig`) and checksums (`SHA256SUMS.txt`) are on the
+[Releases page](https://github.com/mk-manishkandel/MiniSync/releases).
 
 <details>
 <summary><b>Windows says "Windows protected your PC"</b></summary>

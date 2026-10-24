@@ -113,8 +113,26 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           v="${{ needs.version.outputs.version }}"
+          base="https://github.com/$GITHUB_REPOSITORY/releases/download/v$v"
+          cat > notes.md <<EOF
+          ## Download
+
+          | Computer | File |
+          |---|---|
+          | Windows 10/11 (64-bit) | **[minisync-windows-x64.exe]($base/minisync-windows-x64.exe)** |
+          | Mac with Apple chip (M1/M2/M3/M4) | **[minisync-macos-arm64]($base/minisync-macos-arm64)** |
+          | Mac with Intel chip | **[minisync-macos-x64]($base/minisync-macos-x64)** |
+
+          Open the file and follow the setup. Already installed? Mini Sync updates itself
+          (tray icon → *Check for updates*).
+
+          First time on a Mac: \`chmod +x minisync-macos-*\` and \`xattr -d com.apple.quarantine minisync-macos-*\`
+          in Terminal, then run it. See the [README](https://github.com/$GITHUB_REPOSITORY#download) for help.
+
+          EOF
           gh release create "v$v" dist/* \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "Mini Sync v$v" \
+            --notes-file notes.md \
             --generate-notes
