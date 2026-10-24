@@ -79,6 +79,10 @@ pub enum Access {
 }
 
 impl Access {
+    pub fn is_read_write(&self) -> bool {
+        *self == Access::ReadWrite
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Access::ReadWrite => "read & write",
@@ -100,7 +104,7 @@ pub struct FolderConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
     /// For a folder we joined: what the owner allows this device to do.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Access::is_read_write")]
     pub access: Access,
     /// For a folder we own: the devices it is shared with.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

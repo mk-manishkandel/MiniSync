@@ -525,6 +525,51 @@ mod console {
         fn FreeConsole() -> i32;
         fn SetConsoleTitleW(title: *const u16) -> i32;
         fn SetStdHandle(std_handle: u32, handle: *mut std::ffi::c_void) -> i32;
+        fn GetConsoleScreenBufferInfo(h: *mut std::ffi::c_void, info: *mut BufferInfo) -> i32;
+        fn GetLargestConsoleWindowSize(h: *mut std::ffi::c_void) -> Coord;
+        fn SetConsoleScreenBufferSize(h: *mut std::ffi::c_void, size: Coord) -> i32;
+        fn SetConsoleWindowInfo(h: *mut std::ffi::c_void, absolute: i32, rect: *const Rect) -> i32;
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct Coord {
+        x: i16,
+        y: i16,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct Rect {
+        left: i16,
+        top: i16,
+        right: i16,
+        bottom: i16,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct BufferInfo {
+        size: Coord,
+        cursor: Coord,
+        attributes: u16,
+        window: Rect,
+        max_window: Coord,
+    }
+
+    /// Makes the menu window tall enough for the whole menu, with scrollback
+    /// so new output always scrolls into view. Best effort: terminals that
+    /// manage their own size (e.g. Windows Terminal) ignore it.
+    unsafe fn size_window(h: *mut std::ffi::c_void) {
+        let mut info = BufferInfo::default();
+        if GetConsoleScreenBufferInfo(h, &mut info) == 0 {
+            return;
+        }
+        let largest = GetLargestConsoleWindowSize(h);
+        let cols = info.size.x.max(100).min(largest.x.max(80));
+        let rows = 42.min(largest.y.max(25));
+        SetConsoleScreenBufferSize(h, Coord { x: cols, y: 2000 });
+        SetConsoleWindowInfo(h, 1, &Rect { left: 0, top: 0, right: cols - 1, bottom: rows - 1 });
     }
     const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
     const STD_INPUT_HANDLE: u32 = -10i32 as u32;
@@ -552,6 +597,7 @@ mod console {
                 if let Some(h) = open("CONOUT$") {
                     SetStdHandle(STD_OUTPUT_HANDLE, h);
                     SetStdHandle(STD_ERROR_HANDLE, h);
+                    size_window(h);
                 }
             } else {
                 AttachConsole(ATTACH_PARENT_PROCESS);

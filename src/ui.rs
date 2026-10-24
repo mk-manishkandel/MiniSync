@@ -70,6 +70,14 @@ pub fn boxed(lines: &[(String, String)]) {
     println!("  {}", dim(&format!("╰{}╯", "─".repeat(width))));
 }
 
+/// Starts a fresh screen for one menu action, so its questions start at
+/// the top instead of scrolling below the menu.
+pub fn page(title: &str) {
+    clear();
+    println!("\n  {}  {}  {}", accent("Mini Sync"), dim("›"), bold(title));
+    println!("  {}", dim(&"─".repeat(64)));
+}
+
 pub fn section(title: &str) {
     println!("\n  {}", dim(&title.to_uppercase()));
 }

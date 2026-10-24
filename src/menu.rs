@@ -148,17 +148,21 @@ fn access_text(access: Option<Access>) -> String {
     }
 }
 
-/// One line describing who a folder is shared with.
+/// One plain sentence: who shares this folder with whom.
 fn folder_role(cfg: &Config, f: &FolderConfig) -> String {
     if let Some(owner) = &f.owner {
-        return format!("from {} - you have {}", cfg.peer_name(owner), access_text(Some(f.access)));
+        let can = match f.access {
+            Access::ReadWrite => ui::green("can read & write"),
+            Access::ReadOnly => ui::yellow("can only read"),
+        };
+        return format!("Shared with you by {} · you {can}", cfg.peer_name(owner));
     }
     if f.shared_with.is_empty() {
-        return format!("yours - {}", ui::yellow("not shared yet (choose 5)"));
+        return ui::yellow("Not shared with any device yet → choose 5");
     }
     let list: Vec<String> =
-        f.shared_with.iter().map(|s| format!("{} {}", cfg.peer_name(&s.device), access_text(Some(s.access)))).collect();
-    format!("yours - {}", list.join(", "))
+        f.shared_with.iter().map(|s| format!("{} ({})", cfg.peer_name(&s.device), access_text(Some(s.access)))).collect();
+    format!("You share it with {}", list.join(", "))
 }
 
 // ---------------- first-time setup ----------------
@@ -180,40 +184,41 @@ fn setup(home: &Home) -> Result<()> {
     ui::info("to your other device (send it to yourself by email or chat).");
     show_id(&key.public);
 
-    ui::section("Step 3 of 4 - connect your other device");
-    ui::info("Its ID is shown in Mini Sync on that device (during its setup, or menu -> 1).");
-    let peer = ask_peer(&key.public, "skip");
-    match &peer {
-        Some(p) => {
-            cfg.upsert_peer(p.clone());
-            home.save_config(&cfg)?;
-            ui::ok(&format!("{} added.", p.name));
-        }
-        None => ui::info("Skipped. Add it later: menu -> 2."),
-    }
-
-    ui::section("Step 4 of 4 - share a folder from this device?");
+    ui::section("Step 3 of 4 - share a folder from this device?");
     ui::info("Only do this on the device that HAS the files. On the other device, skip this");
     ui::info("step: it gets an invitation to join instead.");
     let options = [("Yes", "pick a folder on this device to share"), ("No", "skip (join or add a folder later)")];
-    let mut shared = None;
     if choose(&options, "skip") == Some(0) {
         let default_folder = dirs::home_dir().unwrap_or_default().join("MiniSync");
         ui::info("Type or drag in a folder, or press Enter for the suggested one (created if needed).");
         let path = PathBuf::from(ask("Folder", &default_folder.display().to_string()));
-        let mut folder = FolderConfig::new_own(path);
-        if let Some(p) = &peer {
-            println!();
-            if let Some(access) = ask_access(&p.name, "decide later") {
-                folder.set_share(&DeviceId::parse(&p.id)?, access);
-                shared = access.map(|a| (p.name.clone(), a));
-            }
-        }
-        ui::ok(&format!("Added {}.", folder.path.display()));
+        let folder = FolderConfig::new_own(path);
+        ui::ok(&format!("Added {}. Next, choose which device gets it.", folder.path.display()));
         cfg.folders.push(folder);
         home.save_config(&cfg)?;
     } else {
         ui::info("Skipped. No folder was created.");
+    }
+
+    ui::section("Step 4 of 4 - connect your other device");
+    ui::info("Its ID is shown in Mini Sync on that device (during its setup, or menu -> 1).");
+    let peer = ask_peer(&key.public, "skip");
+    let mut shared = None;
+    match &peer {
+        Some(p) => {
+            cfg.upsert_peer(p.clone());
+            ui::ok(&format!("{} added.", p.name));
+            if let Some(folder) = cfg.folders.first_mut() {
+                println!();
+                ui::info(&format!("Your folder: {}", folder.path.display()));
+                if let Some(access) = ask_access(&p.name, "decide later") {
+                    folder.set_share(&DeviceId::parse(&p.id)?, access);
+                    shared = access.map(|a| (p.name.clone(), a));
+                }
+            }
+            home.save_config(&cfg)?;
+        }
+        None => ui::info("Skipped. Add it later: menu -> 2."),
     }
 
     println!();
@@ -298,23 +303,29 @@ fn draw(cfg: &Config, key: &DeviceId, running: bool, upd: &UpdateInfo) {
     }
     ui::boxed(&lines);
 
-    println!();
-    ui::field("This device", &ui::bold(&cfg.device_name));
-    ui::field("Device ID", &key.to_string());
+    ui::section("This device");
+    ui::field("  Name", &ui::bold(&cfg.device_name));
+    ui::field("  ID", &key.to_string());
     if cfg.peers.is_empty() {
-        ui::field("Devices", &ui::yellow("none yet - choose 2 to add one"));
+        ui::field("  Devices", &ui::yellow("none yet → choose 2 to add one"));
     } else {
         let names: Vec<&str> = cfg.peers.iter().map(|p| p.name.as_str()).collect();
-        ui::field("Devices", &names.join(", "));
+        ui::field("  Devices", &names.join(", "));
     }
+
+    ui::section("Folders");
     if cfg.folders.is_empty() {
-        ui::field("Folders", &ui::yellow("none yet - choose 4 to add one, or 6 to join one"));
+        println!("    {}", ui::yellow("None yet → choose 4 to share one, or 6 to join one"));
     }
-    for (i, f) in cfg.folders.iter().enumerate() {
-        let label = format!("{}  {}", ui::bold(&f.label()), ui::dim(&f.path.display().to_string()));
-        ui::field(if i == 0 { "Folders" } else { "" }, &label);
-        ui::field("", &folder_role(cfg, f));
+    let width = cfg.folders.iter().map(|f| f.label().chars().count()).max().unwrap_or(0).clamp(8, 18);
+    for f in &cfg.folders {
+        let mut name: String = f.label().chars().take(width).collect();
+        let pad = width - name.chars().count();
+        name = format!("{}{}", ui::bold(&name), " ".repeat(pad));
+        println!("    {name}   {}", ui::dim(&f.path.display().to_string()));
+        println!("    {}   {}", " ".repeat(width), folder_role(cfg, f));
     }
+    println!("\n  {}", ui::dim(&"─".repeat(64)));
 
     let invites = match cfg.pending_invites() {
         0 => "Invitations".to_string(),
@@ -372,7 +383,7 @@ fn menu(home: &Home) -> Result<()> {
         println!();
         match choice.as_str() {
             "1" => {
-                ui::section("This device's ID");
+                ui::page("This device's ID");
                 show_id(&key.public);
                 ui::info("Paste it on your other device: menu -> 2.");
                 pause();
@@ -390,7 +401,7 @@ fn menu(home: &Home) -> Result<()> {
                 }
                 1 => service::open_path(&cfg.folders[0].path),
                 _ => {
-                    ui::section("Open a synced folder");
+                    ui::page("Open a synced folder");
                     let labels: Vec<String> = cfg.folders.iter().map(|f| f.label()).collect();
                     if let Some(i) = pick("folder", &labels, "back") {
                         service::open_path(&cfg.folders[i].path);
@@ -399,10 +410,12 @@ fn menu(home: &Home) -> Result<()> {
             },
             "9" => service::open_path(&service::log_path(home)),
             "10" => {
+                ui::page(if running { "Restart" } else { "Start" });
                 restart(home, &cfg);
                 pause();
             }
             "11" => {
+                ui::page("Stop syncing");
                 if confirm("Stop syncing until next login?") {
                     service::stop(cfg.listen_port);
                     ui::ok("Stopped. It starts again at next login (or choose 10).");
@@ -410,7 +423,7 @@ fn menu(home: &Home) -> Result<()> {
                 }
             }
             "12" => {
-                ui::section("Change this device's ID");
+                ui::page("Change this device's ID");
                 ui::info("This gives this device a new ID. The old ID stops working right away,");
                 ui::info("so your other devices stop syncing with it until you give them the new ID");
                 ui::info("(on each: menu -> 2, using the same name as before).");
@@ -428,7 +441,7 @@ fn menu(home: &Home) -> Result<()> {
                 }
             }
             "13" => {
-                ui::section("Uninstall");
+                ui::page("Uninstall");
                 ui::info("Removes Mini Sync, its settings and this device's ID from this computer.");
                 ui::info("Your synced files (and the .minisync-trash backup folder) are NOT deleted.");
                 println!();
@@ -440,7 +453,7 @@ fn menu(home: &Home) -> Result<()> {
                 }
             }
             "14" => {
-                ui::section("Updates");
+                ui::page("Updates");
                 ui::info(&format!("This is v{}. Checking GitHub...", update::CURRENT_VERSION));
                 match update::check() {
                     Ok(None) => {
@@ -478,7 +491,7 @@ fn menu(home: &Home) -> Result<()> {
 // ---------------- devices ----------------
 
 fn add_device(home: &Home, cfg: &Config, me: &DeviceId) -> Result<()> {
-    ui::section("Add or update a device");
+    ui::page("Add or update a device");
     if !cfg.peers.is_empty() {
         ui::info("To update a device that got a new ID, use the same name as before.");
     }
@@ -493,28 +506,24 @@ fn add_device(home: &Home, cfg: &Config, me: &DeviceId) -> Result<()> {
     } else {
         ui::ok(&format!("Added {name}."));
         ui::info(&format!("Also add this device's ID on {name} (there: menu -> 2), or they can't connect."));
-        let mine: Vec<FolderConfig> = cfg.folders.iter().filter(|f| f.is_mine()).cloned().collect();
+        // Straight on to: which of your folders does it get, and with what access?
+        let dev = DeviceId::parse(&id)?;
+        let mine: Vec<usize> = (0..cfg.folders.len()).filter(|&i| cfg.folders[i].is_mine()).collect();
         if !mine.is_empty() {
+            ui::section(&format!("Which of your folders should {name} get?"));
+        }
+        for i in mine {
+            let f = &mut cfg.folders[i];
             println!();
-            ui::info(&format!("{name} gets none of your folders until you share one."));
-            if confirm(&format!("Share a folder with {name} now?")) {
-                let folder = if mine.len() == 1 {
-                    Some(mine[0].clone())
-                } else {
-                    let labels: Vec<String> = mine.iter().map(|f| f.label()).collect();
-                    pick("folder", &labels, "skip").map(|i| mine[i].clone())
-                };
-                if let Some(folder) = folder {
-                    println!();
-                    if let Some(Some(access)) = ask_access(&name, "skip") {
-                        if let Some(f) = cfg.folders.iter_mut().find(|f| f.id == folder.id) {
-                            f.set_share(&DeviceId::parse(&id)?, Some(access));
-                        }
-                        home.save_config(&cfg)?;
-                        ui::ok(&format!("{name} gets {:?} ({}). It will see an invitation to accept.", folder.label(), access.label()));
-                    }
-                }
+            ui::field("  Folder", &format!("{}  {}", ui::bold(&f.label()), ui::dim(&f.path.display().to_string())));
+            if let Some(Some(access)) = ask_access(&name, "no access") {
+                f.set_share(&dev, Some(access));
+                ui::ok(&format!("{name} gets {} ({}).", f.label(), access.label()));
             }
+        }
+        home.save_config(&cfg)?;
+        if cfg.folders.iter().any(|f| f.share_for(&dev).is_some()) {
+            ui::info(&format!("{name} will see an invitation to accept (there: menu -> 6)."));
         }
     }
     restart(home, &cfg);
@@ -523,7 +532,7 @@ fn add_device(home: &Home, cfg: &Config, me: &DeviceId) -> Result<()> {
 }
 
 fn remove_device(home: &Home, cfg: &Config) -> Result<()> {
-    ui::section("Remove a device");
+    ui::page("Remove a device");
     if cfg.peers.is_empty() {
         ui::info("There is no device to remove.");
         pause();
@@ -551,7 +560,7 @@ fn remove_device(home: &Home, cfg: &Config) -> Result<()> {
 // ---------------- folders ----------------
 
 fn add_folder(home: &Home, cfg: &Config) -> Result<()> {
-    ui::section("Add a folder to share");
+    ui::page("Add a folder to share");
     ui::info("Pick a folder on THIS device. You then choose which devices get it.");
     ui::info("(To get a folder another device shares with you, use 6 Invitations instead.)");
     ui::info("Tip: drag the folder into this window to paste its path.");
@@ -585,7 +594,7 @@ fn add_folder(home: &Home, cfg: &Config) -> Result<()> {
 }
 
 fn share_menu(home: &Home, cfg: &Config) -> Result<()> {
-    ui::section("Share a folder / change access");
+    ui::page("Share a folder / change access");
     let mine: Vec<&FolderConfig> = cfg.folders.iter().filter(|f| f.is_mine()).collect();
     if mine.is_empty() {
         ui::info("You don't own any folder yet (choose 4 to add one).");
@@ -653,7 +662,7 @@ fn share_folder(home: &Home, cfg: &mut Config, folder_id: &str) -> Result<bool> 
 }
 
 fn invitations(home: &Home, cfg: &Config) -> Result<()> {
-    ui::section("Invitations");
+    ui::page("Invitations");
     if cfg.invites.is_empty() {
         ui::info("No invitations. When another device shares a folder with this one,");
         ui::info("it shows up here (both devices must be running and connected).");
@@ -741,7 +750,7 @@ fn is_empty_dir(path: &Path) -> bool {
 }
 
 fn remove_folder(home: &Home, cfg: &Config) -> Result<()> {
-    ui::section("Remove a folder");
+    ui::page("Remove a folder");
     if cfg.folders.is_empty() {
         ui::info("There is no folder to remove.");
         pause();

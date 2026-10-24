@@ -92,11 +92,15 @@ never creates or shares anything by itself.
 1. **Name** this device (e.g. `office-pc`, `macbook`).
 2. It shows **this device's ID** (already copied to the clipboard). Send it to your other device,
    e.g. by email or chat to yourself.
-3. **Paste the other device's ID** and give that device a name. (Enter = skip, add it later.)
-4. **Share a folder from this device?**
-   - On the device that **has the files**: type **1 (Yes)**, pick the folder, then choose what the
-     other device may do: **read & write** or **read only**.
+3. **Share a folder from this device?**
+   - On the device that **has the files**: type **1 (Yes)** and pick the folder.
    - On the **other** device: press **Enter (skip)**. It gets an invitation to join instead.
+4. **Paste the other device's ID** and give that device a name (Enter = skip, add it later).
+   If you shared a folder in step 3, choose what that device may do with it:
+   **read & write**, **read only**, or Enter to decide later.
+
+Adding a device later (menu → **2**) works the same way: after its ID and name, it asks for each of
+your folders whether that device gets it, and with what access.
 
 Setup ends with a short **What's next** list. Allow network access when asked
 (Windows: firewall prompt → *Allow*; Mac: *Local Network* → *Allow*). Mini Sync then runs in the
@@ -148,22 +152,30 @@ If one is away, changes wait and sync when it's back.
 | *Open synced folder* · *View log* | Shortcuts |
 | *Quit* | Stops until next login |
 
-**Menu** (tray → *Open Mini Sync…*). Every question accepts **Enter / 0 = back**:
+**Menu** (tray → *Open Mini Sync…*). Type a number; every action opens on its own page, and each
+prompt says what **Enter** does:
 
 ```
   ╭────────────────────────────────────╮
-  │  Mini Sync  v0.3.1                 │
+  │  Mini Sync  v0.3.2                 │
   │  ● Running in the background       │
   │  ✉ 1 folder invitation - choose 6  │
   ╰────────────────────────────────────╯
 
-  This device   office-pc
-  Device ID     A4DQOBY-HA4DQOB-YHA4DQO-...
-  Devices       laptop, family-mac
-  Folders       MiniSync  C:\Users\me\MiniSync
-                yours - laptop read & write, family-mac read only
-                Work  C:\Users\me\Work
-                from laptop - you have read & write
+  THIS DEVICE
+    Name        office-pc
+    ID          A4DQOBY-HA4DQOB-YHA4DQO-...
+    Devices     laptop, family-mac
+
+  FOLDERS
+    MiniSync   C:\Users\me\MiniSync
+               You share it with laptop (read & write), family-mac (read only)
+    Photos     C:\Users\me\Photos
+               Not shared with any device yet → choose 5
+    Work       C:\Users\me\Work
+               Shared with you by laptop · you can only read
+
+  ────────────────────────────────────────────────────────────────
 
   DEVICES                          FOLDERS
     1  Copy this device's ID        4  Add a folder
