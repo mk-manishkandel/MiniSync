@@ -3,6 +3,7 @@
 
 mod config;
 mod folder;
+mod logfile;
 mod menu;
 mod net;
 mod proto;
@@ -337,12 +338,8 @@ fn init_logging(home: &Home, background: bool) {
     let mut builder = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
     builder.format_target(false);
     if background {
-        let path = service::log_path(home);
         let _ = std::fs::create_dir_all(&home.dir);
-        if std::fs::metadata(&path).map(|m| m.len() > 10 * 1024 * 1024).unwrap_or(false) {
-            let _ = std::fs::rename(&path, path.with_extension("log.old"));
-        }
-        if let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        if let Ok(f) = logfile::RotatingLog::open(&service::log_path(home)) {
             builder.target(env_logger::Target::Pipe(Box::new(f)));
         }
     }

@@ -380,7 +380,9 @@ pub async fn run_conn(hub: Arc<Hub>, stream: TcpStream, initiator: bool) {
         }
     };
     if !hub.peers.contains_key(&peer) {
-        log::warn!("unknown device {peer} at {addr} tried to connect; add it with `minisync add-peer` if it is yours");
+        if crate::logfile::throttle(&format!("unknown-{peer}"), crate::logfile::REPEAT) {
+            log::warn!("unknown device {peer} at {addr} tried to connect; add it with `minisync add-peer` if it is yours");
+        }
         return;
     }
     let initiator_id = if initiator { hub.me } else { peer };
@@ -428,7 +430,9 @@ pub async fn run_conn(hub: Arc<Hub>, stream: TcpStream, initiator: bool) {
         let msg = match tokio::time::timeout(IDLE_TIMEOUT, recv_msg(&mut r, &noise)).await {
             Ok(Ok(m)) => m,
             Ok(Err(e)) if !got_hello => {
-                log::warn!("could not talk to {name} ({e}); make sure both devices run the latest Mini Sync");
+                if crate::logfile::throttle(&format!("talk-{peer}"), crate::logfile::REPEAT) {
+                    log::warn!("could not talk to {name} ({e}); make sure both devices run the latest Mini Sync");
+                }
                 break;
             }
             Ok(Err(e)) => {
@@ -443,7 +447,9 @@ pub async fn run_conn(hub: Arc<Hub>, stream: TcpStream, initiator: bool) {
         match msg {
             Message::Hello { protocol, device_name, offers } => {
                 if protocol != proto::PROTOCOL {
-                    log::warn!("{name} runs a different Mini Sync version; update both devices");
+                    if crate::logfile::throttle(&format!("version-{peer}"), crate::logfile::REPEAT) {
+                        log::warn!("{name} runs a different Mini Sync version; update both devices");
+                    }
                     break;
                 }
                 got_hello = true;
@@ -468,7 +474,9 @@ pub async fn run_conn(hub: Arc<Hub>, stream: TcpStream, initiator: bool) {
                     let data = if allowed {
                         serve_request(&hub, &folder, &file, offset, size).await
                     } else {
-                        log::warn!("refused {} a file from {folder:?}: no access", hub.peer_name(&peer));
+                        if crate::logfile::throttle(&format!("refused-{peer}-{folder}"), crate::logfile::REPEAT) {
+                            log::warn!("refused {} a file from {folder:?}: no access", hub.peer_name(&peer));
+                        }
                         Err("no access to this folder".into())
                     };
                     hub.send(peer, Message::Response { id, data }).await;

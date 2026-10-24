@@ -18,6 +18,8 @@ use tokio::sync::mpsc;
 
 const CHUNK: u32 = 1024 * 1024;
 const INDEX_BATCH: usize = 1000;
+/// Per scan or pull, at most this many files are listed in the log one by one.
+const DETAIL_LINES: usize = 20;
 
 pub struct Folder {
     pub id: String,
@@ -30,6 +32,8 @@ pub struct Folder {
     remote: HashMap<DeviceId, HashMap<String, FileInfo>>,
     /// Peers whose full file list we have received since they connected.
     complete: HashSet<DeviceId>,
+    /// File lines logged in the current scan or pull (see `note`).
+    noted: usize,
     me: u64,
 }
 
@@ -45,7 +49,7 @@ impl Folder {
     pub fn new(id: String, root: PathBuf, ignores: Vec<String>, index_path: PathBuf, hub: Arc<Hub>) -> Folder {
         let index = scan::load_index(&index_path);
         let me = hub.me.short();
-        Folder { id, root, ignores, index_path, hub, index, remote: HashMap::new(), complete: HashSet::new(), me }
+        Folder { id, root, ignores, index_path, hub, index, remote: HashMap::new(), complete: HashSet::new(), noted: 0, me }
     }
 
     pub async fn run(mut self, mut events: mpsc::Receiver<FolderEvent>) {
@@ -71,7 +75,9 @@ impl Folder {
                         let known = self.remote.entry(p).or_default();
                         for f in files {
                             if util::safe_join(&self.root, &f.name).is_none() {
-                                log::warn!("[{}] skipping {:?}: name not valid on this system", self.id, f.name);
+                                if crate::logfile::throttle(&format!("name-{}-{}", self.id, f.name), crate::logfile::REPEAT) {
+                                    log::warn!("[{}] skipping {:?}: name not valid on this system", self.id, f.name);
+                                }
                                 continue;
                             }
                             known.insert(f.name.clone(), f);
@@ -127,17 +133,38 @@ impl Folder {
                 let read_only = self.hub.rule(&self.id).and_then(|r| r.read_only_owner()).is_some();
                 for f in &changed {
                     if read_only {
-                        log::warn!("[{}] local {}: {} - this folder is read only, so it will be undone", self.id, describe(f), f.name);
+                        self.note(true, format!("[{}] local {}: {} - this folder is read only, so it will be undone", self.id, describe(f), f.name));
                     } else {
-                        log::info!("[{}] local {}: {}", self.id, describe(f), f.name);
+                        self.note(false, format!("[{}] local {}: {}", self.id, describe(f), f.name));
                     }
                 }
+                self.end_round("local changes");
                 self.save();
                 self.broadcast(changed).await;
             }
             Ok(_) => {}
             Err(e) => log::error!("[{}] {e:#}", self.id),
         }
+    }
+
+    /// Logs one file line, unless this round already listed `DETAIL_LINES` of them.
+    fn note(&mut self, warn: bool, line: String) {
+        if self.noted < DETAIL_LINES {
+            if warn {
+                log::warn!("{line}");
+            } else {
+                log::info!("{line}");
+            }
+        }
+        self.noted += 1;
+    }
+
+    /// Ends a round of `note`s with one summary line for the files not listed.
+    fn end_round(&mut self, what: &str) {
+        if self.noted > DETAIL_LINES {
+            log::info!("[{}] ...and {} more {what} (not listed)", self.id, self.noted - DETAIL_LINES);
+        }
+        self.noted = 0;
     }
 
     fn may_send_to(&self, peer: &DeviceId) -> bool {
@@ -254,9 +281,12 @@ impl Folder {
                 }
             };
             if let Err(e) = result {
-                log::warn!("[{}] {}: {e:#}", self.id, r.name);
+                if crate::logfile::throttle(&format!("pull-{}-{}", self.id, r.name), crate::logfile::REPEAT) {
+                    log::warn!("[{}] {}: {e:#}", self.id, r.name);
+                }
             }
         }
+        self.end_round("received changes");
         if !changed.is_empty() {
             self.save();
             self.broadcast(changed).await;
@@ -293,7 +323,7 @@ impl Folder {
                     Kind::Dir => std::fs::remove_dir(&path).map_err(Into::into),
                 };
                 match result {
-                    Ok(()) => log::warn!("[{}] removed {} - added here, but this folder is read only (see {})", self.id, l.name, util::TRASH_DIR),
+                    Ok(()) => self.note(true, format!("[{}] removed {} - added here, but this folder is read only (see {})", self.id, l.name, util::TRASH_DIR)),
                     Err(e) => {
                         log::debug!("[{}] {}: {e:#}", self.id, l.name);
                         continue;
@@ -302,6 +332,7 @@ impl Folder {
             }
             self.index.remove(&l.name);
         }
+        self.end_round("files removed");
         self.save();
     }
 
@@ -354,7 +385,7 @@ impl Folder {
             } else if path.exists() {
                 self.trash(&path, &r.name)?;
             }
-            log::info!("[{}] deleted {} (from {from})", self.id, r.name);
+            self.note(false, format!("[{}] deleted {} (from {from})", self.id, r.name));
         } else if r.kind == Kind::Dir {
             if path.is_file() {
                 self.trash(&path, &r.name)?;
@@ -371,7 +402,7 @@ impl Folder {
                 std::fs::create_dir_all(parent)?;
             }
             std::fs::rename(&tmp, &path).with_context(|| format!("moving into place {}", path.display()))?;
-            log::info!("[{}] received {} ({} bytes, from {from})", self.id, r.name, r.size);
+            self.note(false, format!("[{}] received {} ({} bytes, from {from})", self.id, r.name, r.size));
         }
         self.index.insert(r.name.clone(), r.clone());
         changed.push(r.clone());

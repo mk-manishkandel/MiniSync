@@ -157,7 +157,7 @@ prompt says what **Enter** does:
 
 ```
   ╭────────────────────────────────────╮
-  │  Mini Sync  v0.3.3                 │
+  │  Mini Sync  v0.3.4                 │
   │  ● Running in the background       │
   │  ✉ 1 folder invitation - choose 6  │
   ╰────────────────────────────────────╯
@@ -250,6 +250,10 @@ folder being mistaken for "everything was deleted".
 | Installed program | `%LOCALAPPDATA%\MiniSync\minisync.exe` | `~/Library/Application Support/MiniSync/minisync` |
 | Settings, device key, log | `%APPDATA%\minisync\` | `~/Library/Application Support/minisync/` |
 | Start at login | Registry `HKCU\…\Run\MiniSync` | `~/Library/LaunchAgents/com.minisync.plist` |
+
+The log (`minisync.log`) never grows past about 6 MB: at 2 MB it moves to `minisync.log.1` (then `.2`,
+then it is deleted). Warnings that would repeat, e.g. on every connection attempt, are written at most
+once every 10 minutes, and big syncs list the first 20 files and then a summary line.
 
 **Uninstall** (menu 13) removes the program, start-at-login, settings and device key. Synced files and
 `.minisync-trash` are kept.
