@@ -54,6 +54,64 @@ fn build() -> anyhow::Result<Tray> {
     Ok(Tray { icon, status, update, open, folder, log, quit, shown: (String::new(), String::new()) })
 }
 
+/// Installs `rel` in the background; on success the tray exits so the new
+/// version takes over.
+fn start_install(rel: update::Release, updates: SharedUpdate, home: Arc<Home>, exit_now: Arc<AtomicBool>) {
+    *updates.lock().unwrap() = UpdateState::Working(format!("Installing v{}...", rel.version));
+    std::thread::spawn(move || match update::install_from_background(&home, &rel) {
+        Ok(()) => {
+            log::info!("updated to v{}, restarting", rel.version);
+            exit_now.store(true, Ordering::SeqCst);
+        }
+        Err(e) => {
+            log::error!("update failed: {e:#}");
+            *updates.lock().unwrap() = UpdateState::Failed(format!("{e:#}"));
+        }
+    });
+}
+
+/// The last version we showed the update popup for, so "Later" isn't
+/// asked again for the same version (also across restarts).
+fn asked_path(home: &Home) -> std::path::PathBuf {
+    home.dir.join("update-asked.txt")
+}
+
+/// Asks "install now?" in a small system popup. Blocks until answered.
+#[cfg(windows)]
+fn ask_install(version: &str) -> bool {
+    #[link(name = "user32")]
+    extern "system" {
+        fn MessageBoxW(hwnd: *mut std::ffi::c_void, text: *const u16, caption: *const u16, kind: u32) -> i32;
+    }
+    const MB_YESNO: u32 = 0x4;
+    const MB_ICONINFORMATION: u32 = 0x40;
+    const MB_SETFOREGROUND: u32 = 0x1_0000;
+    const MB_TOPMOST: u32 = 0x4_0000;
+    const IDYES: i32 = 6;
+    let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+    let text = wide(&format!(
+        "Mini Sync v{version} is available (you have v{}).\n\nInstall it now? It takes a few seconds; your settings and files are kept.\n\nChoose No to install later from the tray icon.",
+        update::CURRENT_VERSION
+    ));
+    let title = wide("Mini Sync update");
+    let kind = MB_YESNO | MB_ICONINFORMATION | MB_SETFOREGROUND | MB_TOPMOST;
+    unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), title.as_ptr(), kind) == IDYES }
+}
+
+#[cfg(target_os = "macos")]
+fn ask_install(version: &str) -> bool {
+    let script = format!(
+        "display dialog \"Mini Sync v{version} is available (you have v{}).\\n\\nInstall it now? Your settings and files are kept.\" \
+         with title \"Mini Sync update\" buttons {{\"Later\", \"Install\"}} default button \"Install\" with icon note giving up after 3600",
+        update::CURRENT_VERSION
+    );
+    std::process::Command::new("osascript")
+        .args(["-e", &script])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("button returned:Install"))
+        .unwrap_or(false)
+}
+
 fn update_label(state: &UpdateState) -> (String, bool) {
     match state {
         UpdateState::UpToDate => (format!("Check for updates (v{})", update::CURRENT_VERSION), true),
@@ -78,6 +136,7 @@ pub fn run(home: Home, status: Status, updates: SharedUpdate) -> ! {
 
     let exit_now = Arc::new(AtomicBool::new(false));
     let home = Arc::new(home);
+    let mut asked: Option<String> = std::fs::read_to_string(asked_path(&home)).ok().map(|s| s.trim().to_string());
     let mut tray: Option<Tray> = None;
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(500));
@@ -112,19 +171,7 @@ pub fn run(home: Home, status: Status, updates: SharedUpdate) -> ! {
                 let home = home.clone();
                 let exit_now = exit_now.clone();
                 match state {
-                    UpdateState::Available(rel) => {
-                        *updates.lock().unwrap() = UpdateState::Working(format!("Installing v{}...", rel.version));
-                        std::thread::spawn(move || match update::install_from_background(&home, &rel) {
-                            Ok(()) => {
-                                log::info!("updated to v{}, restarting", rel.version);
-                                exit_now.store(true, Ordering::SeqCst);
-                            }
-                            Err(e) => {
-                                log::error!("update failed: {e:#}");
-                                *updates.lock().unwrap() = UpdateState::Failed(format!("{e:#}"));
-                            }
-                        });
-                    }
+                    UpdateState::Available(rel) => start_install(rel, updates, home, exit_now),
                     UpdateState::Working(_) => {}
                     _ => {
                         *updates.lock().unwrap() = UpdateState::Working("Checking for updates...".into());
@@ -140,6 +187,27 @@ pub fn run(home: Home, status: Status, updates: SharedUpdate) -> ! {
 
         let now = status.lock().unwrap().clone();
         let upd = updates.lock().unwrap().clone();
+
+        // A new version was found: ask once with a popup, without opening the app.
+        if let UpdateState::Available(rel) = &upd {
+            if asked.as_deref() != Some(rel.version.as_str()) {
+                asked = Some(rel.version.clone());
+                let _ = std::fs::write(asked_path(&home), &rel.version);
+                log::info!("asking whether to install v{}", rel.version);
+                let (rel, updates, home, exit_now) = (rel.clone(), updates.clone(), home.clone(), exit_now.clone());
+                std::thread::spawn(move || {
+                    if ask_install(&rel.version) {
+                        // Only if nothing else (e.g. the tray item) started meanwhile.
+                        let still = matches!(&*updates.lock().unwrap(), UpdateState::Available(r) if r.version == rel.version);
+                        if still {
+                            start_install(rel, updates, home, exit_now);
+                        }
+                    } else {
+                        log::info!("update to v{} postponed; install it from the tray icon", rel.version);
+                    }
+                });
+            }
+        }
         let (label, enabled) = update_label(&upd);
         if (now.clone(), label.clone()) != t.shown {
             t.status.set_text(format!("Mini Sync - {now}"));

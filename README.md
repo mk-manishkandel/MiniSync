@@ -157,7 +157,7 @@ prompt says what **Enter** does:
 
 ```
   ╭────────────────────────────────────╮
-  │  Mini Sync  v0.3.2                 │
+  │  Mini Sync  v0.3.3                 │
   │  ● Running in the background       │
   │  ✉ 1 folder invitation - choose 6  │
   ╰────────────────────────────────────╯
