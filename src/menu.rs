@@ -1,7 +1,8 @@
 //! What you see when you double-click the app: first-time setup, then a
 //! small menu. Syncing itself always happens in the background process.
 //!
-//! Every question inside a menu option can be left with Enter or 0 ("back").
+//! Every prompt says what pressing Enter does, and there are no hidden
+//! defaults: a choice that creates or shares something must be typed.
 
 use crate::config::{Access, Config, DeviceId, FolderConfig, Home, Invite, PeerConfig};
 use crate::service;
@@ -54,13 +55,9 @@ fn read_line() -> String {
     line.trim().trim_matches('"').to_string()
 }
 
-/// Question with a default that Enter accepts.
+/// Free-text question; Enter uses `default` (shown in the prompt).
 fn ask(question: &str, default: &str) -> String {
-    if default.is_empty() {
-        ui::prompt(&format!("{question}: "));
-    } else {
-        ui::prompt(&format!("{question} {}: ", ui::dim(&format!("[{default}]"))));
-    }
+    ui::prompt(&format!("{question} {}: ", ui::dim(&format!("(Enter = {default})"))));
     let line = read_line();
     if line.is_empty() {
         default.to_string()
@@ -69,28 +66,30 @@ fn ask(question: &str, default: &str) -> String {
     }
 }
 
-/// Question inside a menu option. Returns None when the user goes back
-/// (types 0/b/back, or presses Enter when there is no default).
-fn ask_back(question: &str, default: &str) -> Option<String> {
-    if default.is_empty() {
-        ui::prompt(&format!("{question} {}: ", ui::dim("(Enter or 0 = back)")));
-    } else {
-        ui::prompt(&format!("{question} {} {}: ", ui::dim(&format!("[{default}]")), ui::dim("(0 = back)")));
-    }
-    let line = read_line();
-    if matches!(line.to_lowercase().as_str(), "0" | "b" | "back") {
-        return None;
-    }
-    if line.is_empty() {
-        return if default.is_empty() { None } else { Some(default.to_string()) };
-    }
-    Some(line)
+/// Yes/no; anything other than "y"/"yes" (including Enter) means no.
+fn confirm(question: &str) -> bool {
+    ui::prompt(&format!("{question} {}: ", ui::dim("(y = yes, Enter = no)")));
+    matches!(read_line().to_lowercase().as_str(), "y" | "yes")
 }
 
-/// Yes/no; anything other than "y"/"yes" (including Enter) means no / back.
-fn confirm(question: &str) -> bool {
-    ui::prompt(&format!("{question} {}: ", ui::dim("(y = yes, Enter = back)")));
-    matches!(read_line().to_lowercase().as_str(), "y" | "yes")
+/// Numbered choice with no default: the user must type a number.
+/// Enter or 0 returns None (the caller says what that means in `none`).
+fn choose(options: &[(&str, &str)], none: &str) -> Option<usize> {
+    for (i, (text, help)) in options.iter().enumerate() {
+        println!("   {}  {:<14} {}", ui::cyan(&format!("{:>2}", i + 1)), text, ui::dim(help));
+    }
+    println!();
+    loop {
+        ui::prompt(&format!("Type a number {}: ", ui::dim(&format!("(Enter = {none})"))));
+        let line = read_line();
+        if line.is_empty() || line == "0" {
+            return None;
+        }
+        match line.parse::<usize>() {
+            Ok(n) if n >= 1 && n <= options.len() => return Some(n - 1),
+            _ => ui::warn(&format!("Type a number from 1 to {}.", options.len())),
+        }
+    }
 }
 
 fn pause() {
@@ -108,13 +107,17 @@ fn title_box(subtitle: &str) {
 }
 
 /// Shows a numbered list and returns the chosen index (None = back).
-fn pick(what: &str, items: &[String]) -> Option<usize> {
+fn pick(what: &str, items: &[String], none: &str) -> Option<usize> {
     for (i, item) in items.iter().enumerate() {
         println!("   {}  {item}", ui::cyan(&format!("{:>2}", i + 1)));
     }
     println!();
     loop {
-        let answer = ask_back(&format!("Which {what}?"), "")?;
+        ui::prompt(&format!("Which {what}? {}: ", ui::dim(&format!("(Enter = {none})"))));
+        let answer = read_line();
+        if answer.is_empty() || answer == "0" {
+            return None;
+        }
         match answer.parse::<usize>() {
             Ok(n) if n >= 1 && n <= items.len() => return Some(n - 1),
             _ => ui::warn(&format!("Type a number from 1 to {}.", items.len())),
@@ -122,19 +125,18 @@ fn pick(what: &str, items: &[String]) -> Option<usize> {
     }
 }
 
-/// Asks which access a device gets. Some(None) = no access, None = back.
-fn ask_access(device: &str) -> Option<Option<Access>> {
-    println!("   {}  Read & write  {}", ui::cyan(" 1"), ui::dim("- gets your files and can change them"));
-    println!("   {}  Read only     {}", ui::cyan(" 2"), ui::dim("- gets your files; changes made there are undone"));
-    println!("   {}  No access     {}", ui::cyan(" 3"), ui::dim("- doesn't get this folder"));
-    println!();
-    loop {
-        match ask_back(&format!("Access for {device}"), "")?.as_str() {
-            "1" => return Some(Some(Access::ReadWrite)),
-            "2" => return Some(Some(Access::ReadOnly)),
-            "3" => return Some(None),
-            _ => ui::warn("Type 1, 2 or 3."),
-        }
+/// Asks which access a device gets. Some(None) = no access, None = cancelled.
+fn ask_access(device: &str, none: &str) -> Option<Option<Access>> {
+    ui::info(&format!("What may {device} do with this folder?"));
+    let options = [
+        ("Read & write", "gets the files and can change them"),
+        ("Read only", "gets the files; changes made there are undone"),
+        ("No access", "doesn't get this folder"),
+    ];
+    match choose(&options, none)? {
+        0 => Some(Some(Access::ReadWrite)),
+        1 => Some(Some(Access::ReadOnly)),
+        _ => Some(None),
     }
 }
 
@@ -163,60 +165,80 @@ fn folder_role(cfg: &Config, f: &FolderConfig) -> String {
 
 fn setup(home: &Home) -> Result<()> {
     ui::clear();
-    title_box("First-time setup");
+    title_box("Welcome! Setup takes 4 short steps.");
+    ui::info("Press Enter to accept a suggestion or skip a step - you can change everything later.");
 
-    ui::section("Step 1 of 4 - this device");
-    let name = ask("Name for this device", &crate::default_device_name());
+    ui::section("Step 1 of 4 - name this device");
+    ui::info("Your other devices will see this name.");
+    let name = ask("Name", &crate::default_device_name());
     let key = home.load_or_create_key()?;
     let mut cfg = Config::new(name, 22100);
     home.save_config(&cfg)?;
 
     ui::section("Step 2 of 4 - this device's ID");
+    ui::info("Each device has an ID. Devices only sync with IDs you add, so give this one");
+    ui::info("to your other device (send it to yourself by email or chat).");
     show_id(&key.public);
-    ui::info("Run Mini Sync on your other device too, and give each device the other's ID.");
 
-    ui::section("Step 3 of 4 - your other device");
-    let peer = ask_peer(&key.public);
+    ui::section("Step 3 of 4 - connect your other device");
+    ui::info("Its ID is shown in Mini Sync on that device (during its setup, or menu -> 1).");
+    let peer = ask_peer(&key.public, "skip");
     match &peer {
         Some(p) => {
             cfg.upsert_peer(p.clone());
             home.save_config(&cfg)?;
+            ui::ok(&format!("{} added.", p.name));
         }
-        None => ui::info("Skipped - you can add it later from the menu (option 2)."),
+        None => ui::info("Skipped. Add it later: menu -> 2."),
     }
 
-    ui::section("Step 4 of 4 - folder");
-    println!("   {}  Create a folder on this device and share it", ui::cyan(" 1"));
-    println!("   {}  Join a folder another device shares with me", ui::cyan(" 2"));
-    println!();
-    if ask("Choose", "1") == "1" {
+    ui::section("Step 4 of 4 - share a folder from this device?");
+    ui::info("Only do this on the device that HAS the files. On the other device, skip this");
+    ui::info("step: it gets an invitation to join instead.");
+    let options = [("Yes", "pick a folder on this device to share"), ("No", "skip (join or add a folder later)")];
+    let mut shared = None;
+    if choose(&options, "skip") == Some(0) {
         let default_folder = dirs::home_dir().unwrap_or_default().join("MiniSync");
-        let path = PathBuf::from(ask("Folder to sync", &default_folder.display().to_string()));
+        ui::info("Type or drag in a folder, or press Enter for the suggested one (created if needed).");
+        let path = PathBuf::from(ask("Folder", &default_folder.display().to_string()));
         let mut folder = FolderConfig::new_own(path);
         if let Some(p) = &peer {
             println!();
-            ui::info(&format!("What may {} do with this folder?", p.name));
-            if let Some(access) = ask_access(&p.name) {
+            if let Some(access) = ask_access(&p.name, "decide later") {
                 folder.set_share(&DeviceId::parse(&p.id)?, access);
+                shared = access.map(|a| (p.name.clone(), a));
             }
         }
+        ui::ok(&format!("Added {}.", folder.path.display()));
         cfg.folders.push(folder);
         home.save_config(&cfg)?;
     } else {
-        ui::info("When the other device shares a folder with this one, you'll get an");
-        ui::info("invitation: tray icon -> Open Mini Sync -> 6 (Invitations).");
+        ui::info("Skipped. No folder was created.");
     }
 
     println!();
-    ui::info("Installing and starting in the background...");
+    ui::info("Starting Mini Sync in the background...");
     match service::install(home, cfg.listen_port) {
-        Ok(exe) => {
-            ui::ok("Done! Mini Sync is running in the background and starts at every login.");
-            ui::info(&format!("Installed to {}", exe.display()));
-            ui::info("To open this menu again: tray icon -> Open Mini Sync.");
-        }
+        Ok(_) => ui::ok("Mini Sync is running and starts automatically when you log in."),
         Err(e) => ui::err(&format!("Could not install: {e:#}")),
     }
+
+    ui::section("What's next");
+    let mut step = 1;
+    let mut next = |text: String| {
+        println!("   {}  {text}", ui::cyan(&format!("{step}.")));
+        step += 1;
+    };
+    match &peer {
+        None => next("On your other device: open Mini Sync and add this device's ID (menu -> 2).".into()),
+        Some(p) => next(format!("On {}: add this device's ID too, if you haven't yet (menu -> 2).", p.name)),
+    }
+    match (&shared, cfg.folders.is_empty()) {
+        (Some((name, a)), _) => next(format!("On {name}: accept the folder invitation (menu -> 6). Access: {}.", a.label())),
+        (None, false) => next("Choose who gets your folder: menu -> 5.".into()),
+        (None, true) => next("To get a folder from another device: share it there, then accept it here (menu -> 6).".into()),
+    }
+    next("Open this menu any time: Mini Sync icon (Windows: by the clock; Mac: menu bar) -> Open Mini Sync.".into());
     pause();
     Ok(())
 }
@@ -228,16 +250,21 @@ fn show_id(id: &DeviceId) {
     }
 }
 
-fn ask_peer(me: &DeviceId) -> Option<PeerConfig> {
+/// `none` says what Enter does here ("skip" in setup, "back" in the menu).
+fn ask_peer(me: &DeviceId, none: &str) -> Option<PeerConfig> {
     loop {
-        let id = ask_back("Paste the other device's ID", "")?;
+        ui::prompt(&format!("Paste the other device's ID {}: ", ui::dim(&format!("(Enter = {none})"))));
+        let id = read_line();
+        if id.is_empty() || id == "0" {
+            return None;
+        }
         match DeviceId::parse(&id) {
             Ok(parsed) if parsed == *me => ui::warn("That is this device's own ID. Paste the OTHER device's ID."),
             Ok(parsed) => {
-                let name = ask_back("Name for that device", "my-other-device")?;
+                let name = ask("Name for that device (e.g. laptop, macbook)", "my-other-device");
                 return Some(PeerConfig { name, id: parsed.to_string(), addresses: vec![] });
             }
-            Err(_) => ui::warn("That doesn't look like a device ID, try again."),
+            Err(_) => ui::warn("That doesn't look like a device ID (it looks like XXXXXXX-XXXXXXX-...). Try again."),
         }
     }
 }
@@ -365,7 +392,7 @@ fn menu(home: &Home) -> Result<()> {
                 _ => {
                     ui::section("Open a synced folder");
                     let labels: Vec<String> = cfg.folders.iter().map(|f| f.label()).collect();
-                    if let Some(i) = pick("folder", &labels) {
+                    if let Some(i) = pick("folder", &labels, "back") {
                         service::open_path(&cfg.folders[i].path);
                     }
                 }
@@ -455,17 +482,40 @@ fn add_device(home: &Home, cfg: &Config, me: &DeviceId) -> Result<()> {
     if !cfg.peers.is_empty() {
         ui::info("To update a device that got a new ID, use the same name as before.");
     }
-    let Some(peer) = ask_peer(me) else { return Ok(()) };
+    let Some(peer) = ask_peer(me, "back") else { return Ok(()) };
     let mut cfg = cfg.clone();
     let name = peer.name.clone();
+    let id = peer.id.clone();
     let replaced = cfg.upsert_peer(peer);
     home.save_config(&cfg)?;
     if replaced {
         ui::ok(&format!("Updated {name}'s ID - the old ID is no longer trusted. Its folder access is kept."));
     } else {
         ui::ok(&format!("Added {name}."));
-        ui::info(&format!("Make sure this device's ID is added on {name} too."));
-        ui::info(&format!("{name} sees none of your folders until you share one with it (5)."));
+        ui::info(&format!("Also add this device's ID on {name} (there: menu -> 2), or they can't connect."));
+        let mine: Vec<FolderConfig> = cfg.folders.iter().filter(|f| f.is_mine()).cloned().collect();
+        if !mine.is_empty() {
+            println!();
+            ui::info(&format!("{name} gets none of your folders until you share one."));
+            if confirm(&format!("Share a folder with {name} now?")) {
+                let folder = if mine.len() == 1 {
+                    Some(mine[0].clone())
+                } else {
+                    let labels: Vec<String> = mine.iter().map(|f| f.label()).collect();
+                    pick("folder", &labels, "skip").map(|i| mine[i].clone())
+                };
+                if let Some(folder) = folder {
+                    println!();
+                    if let Some(Some(access)) = ask_access(&name, "skip") {
+                        if let Some(f) = cfg.folders.iter_mut().find(|f| f.id == folder.id) {
+                            f.set_share(&DeviceId::parse(&id)?, Some(access));
+                        }
+                        home.save_config(&cfg)?;
+                        ui::ok(&format!("{name} gets {:?} ({}). It will see an invitation to accept.", folder.label(), access.label()));
+                    }
+                }
+            }
+        }
     }
     restart(home, &cfg);
     pause();
@@ -480,7 +530,7 @@ fn remove_device(home: &Home, cfg: &Config) -> Result<()> {
         return Ok(());
     }
     let names: Vec<String> = cfg.peers.iter().map(|p| p.name.clone()).collect();
-    let Some(i) = pick("device", &names) else { return Ok(()) };
+    let Some(i) = pick("device", &names, "back") else { return Ok(()) };
     let peer = cfg.peers[i].clone();
     let joined: Vec<String> =
         cfg.folders.iter().filter(|f| f.owner.as_ref() == Some(&peer.id)).map(|f| f.label()).collect();
@@ -501,9 +551,16 @@ fn remove_device(home: &Home, cfg: &Config) -> Result<()> {
 // ---------------- folders ----------------
 
 fn add_folder(home: &Home, cfg: &Config) -> Result<()> {
-    ui::section("Add a folder");
-    ui::info("The folder is yours: you decide which devices get it and what they may do.");
-    let Some(path) = ask_back("Folder path", "") else { return Ok(()) };
+    ui::section("Add a folder to share");
+    ui::info("Pick a folder on THIS device. You then choose which devices get it.");
+    ui::info("(To get a folder another device shares with you, use 6 Invitations instead.)");
+    ui::info("Tip: drag the folder into this window to paste its path.");
+    println!();
+    ui::prompt(&format!("Folder path {}: ", ui::dim("(Enter = back)")));
+    let path = read_line();
+    if path.is_empty() || path == "0" {
+        return Ok(());
+    }
     let path = PathBuf::from(path);
     if let Some(f) = cfg.folders.iter().find(|f| f.path == path) {
         ui::err(&format!("That folder is already synced ({}).", f.label()));
@@ -515,8 +572,11 @@ fn add_folder(home: &Home, cfg: &Config) -> Result<()> {
     let id = folder.id.clone();
     cfg.folders.push(folder);
     home.save_config(&cfg)?;
-    ui::ok("Added. It isn't shared with any device yet.");
-    if !cfg.peers.is_empty() && confirm("Choose who gets it now?") {
+    ui::ok(&format!("Added {}.", cfg.folders.last().map(|f| f.label()).unwrap_or_default()));
+    if cfg.peers.is_empty() {
+        ui::info("Add a device (2), then choose who gets this folder (5).");
+    } else {
+        ui::section("Who gets this folder?");
         share_folder(home, &mut cfg, &id)?;
     }
     restart(home, &cfg);
@@ -543,7 +603,7 @@ fn share_menu(home: &Home, cfg: &Config) -> Result<()> {
     } else {
         let labels: Vec<String> =
             mine.iter().map(|f| format!("{}  {}", f.label(), ui::dim(&f.path.display().to_string()))).collect();
-        let Some(i) = pick("folder", &labels) else { return Ok(()) };
+        let Some(i) = pick("folder", &labels, "back") else { return Ok(()) };
         mine[i].id.clone()
     };
     let mut cfg = cfg.clone();
@@ -561,6 +621,7 @@ fn share_folder(home: &Home, cfg: &mut Config, folder_id: &str) -> Result<bool> 
         let Some(f) = cfg.folders.iter().find(|f| f.id == folder_id).cloned() else { return Ok(changed) };
         println!();
         ui::field("Folder", &format!("{}  {}", ui::bold(&f.label()), ui::dim(&f.path.display().to_string())));
+        ui::info("Pick a device to set its access. Press Enter when you're done.");
         println!();
         let rows: Vec<String> = cfg
             .peers
@@ -570,18 +631,23 @@ fn share_folder(home: &Home, cfg: &mut Config, folder_id: &str) -> Result<bool> 
                 format!("{:<20} {}", p.name, access_text(access))
             })
             .collect();
-        let Some(i) = pick("device (to change its access)", &rows) else { return Ok(changed) };
+        let Some(i) = pick("device", &rows, "done") else { return Ok(changed) };
         let peer = cfg.peers[i].clone();
-        let Some(access) = ask_access(&peer.name) else { continue };
+        let Some(access) = ask_access(&peer.name, "cancel") else { continue };
         let dev = DeviceId::parse(&peer.id)?;
+        let before = f.share_for(&dev);
+        if before == access {
+            continue;
+        }
         if let Some(f) = cfg.folders.iter_mut().find(|f| f.id == folder_id) {
             f.set_share(&dev, access);
         }
         home.save_config(cfg)?;
         changed = true;
-        match access {
-            Some(a) => ui::ok(&format!("{} now has {} access. It gets an invitation to accept.", peer.name, a.label())),
-            None => ui::ok(&format!("{} no longer gets this folder (its copy is kept but stops syncing).", peer.name)),
+        match (before, access) {
+            (None, Some(a)) => ui::ok(&format!("{} gets {} access. It will see an invitation to accept (there: menu -> 6).", peer.name, a.label())),
+            (Some(_), Some(a)) => ui::ok(&format!("{} now has {} access.", peer.name, a.label())),
+            (_, None) => ui::ok(&format!("{} no longer gets this folder. Its copy is kept but stops syncing.", peer.name)),
         }
     }
 }
@@ -602,22 +668,29 @@ fn invitations(home: &Home, cfg: &Config) -> Result<()> {
             format!("{} from {} - {}{tag}", ui::bold(&i.label), cfg.peer_name(&i.from), access_text(Some(i.access)))
         })
         .collect();
-    let Some(n) = pick("invitation", &rows) else { return Ok(()) };
+    let n = if rows.len() == 1 {
+        println!("   {}", rows[0]);
+        0
+    } else {
+        let Some(n) = pick("invitation", &rows, "back") else { return Ok(()) };
+        n
+    };
     let inv = cfg.invites[n].clone();
 
     println!();
-    ui::info(&format!("{} wants to share {:?} with this device ({}).", cfg.peer_name(&inv.from), inv.label, inv.access.label()));
-    if inv.access == Access::ReadOnly {
-        ui::info("Read only: you get the files, but changes you make there are undone");
-        ui::info("(your edited copy is kept in .minisync-trash).");
+    ui::info(&format!("{} wants to share the folder {:?} with this device.", cfg.peer_name(&inv.from), inv.label));
+    match inv.access {
+        Access::ReadWrite => ui::info("Read & write: you get the files, and your changes are synced back."),
+        Access::ReadOnly => {
+            ui::info("Read only: you get the files, but changes you make there are undone");
+            ui::info("(your edited copy is kept in .minisync-trash).");
+        }
     }
     println!();
-    println!("   {}  Accept", ui::cyan(" 1"));
-    println!("   {}  Decline", ui::cyan(" 2"));
-    println!();
-    match ask_back("Choose", "").as_deref() {
-        Some("1") => accept(home, cfg, &inv),
-        Some("2") => {
+    let options = [("Accept", "choose where to keep it on this device"), ("Decline", "don't sync it")];
+    match choose(&options, "back") {
+        Some(0) => accept(home, cfg, &inv),
+        Some(_) => {
             let mut cfg = cfg.clone();
             if let Some(i) = cfg.invites.iter_mut().find(|i| i.folder == inv.folder && i.from == inv.from) {
                 i.declined = true;
@@ -627,14 +700,16 @@ fn invitations(home: &Home, cfg: &Config) -> Result<()> {
             pause();
             Ok(())
         }
-        _ => Ok(()),
+        None => Ok(()),
     }
 }
 
 fn accept(home: &Home, cfg: &Config, inv: &Invite) -> Result<()> {
     let default = dirs::home_dir().unwrap_or_default().join(&inv.label);
-    let Some(path) = ask_back("Where to keep it on this device", &default.display().to_string()) else { return Ok(()) };
-    let path = PathBuf::from(path);
+    println!();
+    ui::info(&format!("Where should {:?} be kept on this device?", inv.label));
+    ui::info("Type or drag in a folder, or press Enter for the suggested one (created if needed).");
+    let path = PathBuf::from(ask("Folder", &default.display().to_string()));
     if !is_empty_dir(&path) {
         ui::warn(&format!("{} already has files in it.", path.display()));
         match inv.access {
@@ -674,7 +749,7 @@ fn remove_folder(home: &Home, cfg: &Config) -> Result<()> {
     }
     let labels: Vec<String> =
         cfg.folders.iter().map(|f| format!("{}  {}", f.label(), ui::dim(&f.path.display().to_string()))).collect();
-    let Some(i) = pick("folder", &labels) else { return Ok(()) };
+    let Some(i) = pick("folder", &labels, "back") else { return Ok(()) };
     let folder = cfg.folders[i].clone();
     ui::info(&format!("This stops syncing {}. The files stay on this device.", folder.path.display()));
     if folder.is_mine() && !folder.shared_with.is_empty() {
@@ -690,10 +765,10 @@ fn remove_folder(home: &Home, cfg: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Restarts the background sync so a change takes effect.
 fn restart(home: &Home, cfg: &Config) {
-    ui::info("Restarting...");
     match service::restart(home, cfg.listen_port) {
-        Ok(()) => ui::ok("Running."),
-        Err(e) => ui::err(&format!("Restart failed: {e:#}")),
+        Ok(()) => ui::ok("Saved and applied."),
+        Err(e) => ui::err(&format!("Saved, but Mini Sync could not restart: {e:#}")),
     }
 }

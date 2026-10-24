@@ -84,26 +84,30 @@ After the first setup, Mini Sync installs itself and updates on its own.
 
 ## Set up (on every device)
 
-Do this with both computers on the same Wi-Fi.
+Do this with both computers on the same Wi-Fi. Every prompt says what **Enter** does, and Enter
+never creates or shares anything by itself.
 
-1. **Open the downloaded file.** The setup window asks for a **name** for this device
-   (e.g. `office-pc`, `macbook`).
-2. It shows **this device's ID** (already copied to the clipboard).
-3. It asks for the **other device's ID**. Paste it and give that device a name.
-   Send IDs to yourself (email, chat, notes) to copy them between computers.
-4. It asks about a **folder**:
-   - on your **first** device: *Create a folder* (Enter = the `MiniSync` folder in your home folder),
-     then choose what the other device may do: **read & write** or **read only**
-   - on your **other** devices: *Join a folder*. You'll get an invitation (see below)
-5. **Allow network access** when asked:
-   - Windows: firewall prompt → *Allow*
-   - Mac: *Local Network* → *Allow*
-6. Done. It installs itself, runs in the background and starts at every login.
-7. On the joining device, once both are connected: the header shows **✉ 1 folder invitation**.
-   Open the menu → **6 Invitations** → *Accept* → choose where to keep it.
+**On both devices**, open the downloaded file. Setup has 4 steps:
 
-Each device must have **the other device's ID**. To check: the tray icon should say
-**"connected to …"**. Put a file in `MiniSync` and it shows up on the other device within seconds.
+1. **Name** this device (e.g. `office-pc`, `macbook`).
+2. It shows **this device's ID** (already copied to the clipboard). Send it to your other device,
+   e.g. by email or chat to yourself.
+3. **Paste the other device's ID** and give that device a name. (Enter = skip, add it later.)
+4. **Share a folder from this device?**
+   - On the device that **has the files**: type **1 (Yes)**, pick the folder, then choose what the
+     other device may do: **read & write** or **read only**.
+   - On the **other** device: press **Enter (skip)**. It gets an invitation to join instead.
+
+Setup ends with a short **What's next** list. Allow network access when asked
+(Windows: firewall prompt → *Allow*; Mac: *Local Network* → *Allow*). Mini Sync then runs in the
+background and starts at every login.
+
+**Join the folder:** on the other device, once both are connected, the menu header shows
+**✉ 1 folder invitation**. Open the menu → **6** → **Accept** → press Enter for the suggested
+location (or type your own).
+
+To check: the tray icon says **"connected to …"**. Put a file in the folder and it shows up on the
+other device within seconds.
 
 ## Sharing and permissions
 
@@ -148,7 +152,7 @@ If one is away, changes wait and sync when it's back.
 
 ```
   ╭────────────────────────────────────╮
-  │  Mini Sync  v0.3.0                 │
+  │  Mini Sync  v0.3.1                 │
   │  ● Running in the background       │
   │  ✉ 1 folder invitation - choose 6  │
   ╰────────────────────────────────────╯

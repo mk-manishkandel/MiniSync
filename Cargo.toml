@@ -1,6 +1,6 @@
 [package]
 name = "minisync"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 description = "Minimal personal file sync between your own devices on the same network"
 repository = "https://github.com/mk-manishkandel/MiniSync"
