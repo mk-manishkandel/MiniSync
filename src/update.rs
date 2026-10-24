@@ -158,8 +158,13 @@ fn download_verified(rel: &Release) -> Result<PathBuf> {
 fn swap_in(new: &Path) -> Result<PathBuf> {
     let installed = service::installed_exe()?;
     if cfg!(windows) && installed.exists() {
-        let old = installed.with_file_name("minisync.old.exe");
-        let _ = std::fs::remove_file(&old);
+        // An older copy may still be running (e.g. a menu window that was left
+        // open), which locks minisync.old.exe. Then use a fresh name instead.
+        let mut old = installed.with_file_name("minisync.old.exe");
+        if old.exists() && std::fs::remove_file(&old).is_err() {
+            let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+            old = installed.with_file_name(format!("minisync.old-{stamp}.exe"));
+        }
         std::fs::rename(&installed, &old).context("moving the old version aside")?;
     }
     std::fs::rename(new, &installed).context("putting the new version in place")?;
@@ -169,7 +174,14 @@ fn swap_in(new: &Path) -> Result<PathBuf> {
 /// Removes the previous version left behind by an update (best effort).
 pub fn cleanup_old() {
     if let Ok(dir) = service::install_dir() {
-        let _ = std::fs::remove_file(dir.join("minisync.old.exe"));
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for e in entries.flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if name.starts_with("minisync.old") && name.ends_with(".exe") {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
         let _ = std::fs::remove_file(dir.join("minisync.new.exe"));
         let _ = std::fs::remove_file(dir.join("minisync.new"));
     }
@@ -180,6 +192,10 @@ pub fn cleanup_old() {
 pub fn install_from_menu(home: &Home, port: u16, rel: &Release) -> Result<()> {
     if !service::installed_exe()?.exists() {
         bail!("Mini Sync isn't installed on this computer yet");
+    }
+    let me = std::env::current_exe().ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()));
+    if me.is_some_and(|n| n.starts_with("minisync.old")) {
+        bail!("this window is an older version that was already replaced - close it and reopen Mini Sync");
     }
     let new = download_verified(rel)?;
     service::stop(port);
@@ -235,7 +251,10 @@ pub fn check_into(shared: &SharedUpdate) {
             log::info!("update available: v{} (running v{CURRENT_VERSION})", rel.version);
             UpdateState::Available(rel)
         }
-        Ok(None) => UpdateState::UpToDate,
+        Ok(None) => {
+            log::info!("update check: v{CURRENT_VERSION} is the latest");
+            UpdateState::UpToDate
+        }
         Err(e) => {
             log::warn!("update check failed: {e:#}");
             UpdateState::Failed(format!("{e:#}"))
