@@ -351,8 +351,10 @@ fn draw(cfg: &Config, key: &DeviceId, running: bool, upd: &UpdateInfo) {
     row(("9", "View log"), ("12", "Change this device's ID"));
     row(("10", if running { "Restart" } else { "Start" }), ("13", "Uninstall"));
     row(("11", "Stop until next login"), ("14", "Check for updates"));
+    row(("15", "Help & GitHub page"), ("", ""));
 
     println!("\n   {}  {}", ui::cyan(" 0"), ui::dim("Close this window (syncing keeps running)"));
+    println!("\n  {}", ui::dim(&format!("Help & source code: {}", update::WEBSITE)));
     println!();
 }
 
@@ -409,6 +411,7 @@ fn menu(home: &Home) -> Result<()> {
                 }
             },
             "9" => service::open_path(&service::log_path(home)),
+            "15" => service::open_path(std::path::Path::new(update::WEBSITE)),
             "10" => {
                 ui::page(if running { "Restart" } else { "Start" });
                 restart(home, &cfg);

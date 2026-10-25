@@ -22,6 +22,7 @@ struct Tray {
     open: MenuItem,
     folder: MenuItem,
     log: MenuItem,
+    website: MenuItem,
     quit: MenuItem,
     shown: (String, String),
 }
@@ -32,6 +33,7 @@ fn build() -> anyhow::Result<Tray> {
     let open = MenuItem::new("Open Mini Sync...", true, None);
     let folder = MenuItem::new("Open synced folder", true, None);
     let log = MenuItem::new("View log", true, None);
+    let website = MenuItem::new("Help and GitHub page", true, None);
     let quit = MenuItem::new("Quit (until next login)", true, None);
     let menu = Menu::new();
     menu.append(&status)?;
@@ -40,6 +42,7 @@ fn build() -> anyhow::Result<Tray> {
     menu.append(&open)?;
     menu.append(&folder)?;
     menu.append(&log)?;
+    menu.append(&website)?;
     menu.append(&PredefinedMenuItem::separator())?;
     menu.append(&quit)?;
 
@@ -51,7 +54,7 @@ fn build() -> anyhow::Result<Tray> {
         .with_icon_templated(Icon::from_rgba(include_bytes!("../assets/tray-template-44.rgba").to_vec(), 44, 44)?);
 
     let icon = builder.with_menu(Box::new(menu)).with_tooltip("Mini Sync").build()?;
-    Ok(Tray { icon, status, update, open, folder, log, quit, shown: (String::new(), String::new()) })
+    Ok(Tray { icon, status, update, open, folder, log, website, quit, shown: (String::new(), String::new()) })
 }
 
 /// Installs `rel` in the background; on success the tray exits so the new
@@ -165,6 +168,8 @@ pub fn run(home: Home, status: Status, updates: SharedUpdate) -> ! {
                 }
             } else if ev.id == *t.log.id() {
                 service::open_path(&service::log_path(&home));
+            } else if ev.id == *t.website.id() {
+                service::open_path(std::path::Path::new(update::WEBSITE));
             } else if ev.id == *t.update.id() {
                 let state = updates.lock().unwrap().clone();
                 let updates = updates.clone();

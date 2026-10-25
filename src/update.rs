@@ -18,6 +18,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 pub const REPO: &str = "mk-manishkandel/MiniSync";
+/// Project page: downloads, help and source code.
+pub const WEBSITE: &str = "https://github.com/mk-manishkandel/MiniSync";
 
 /// Public half of the release signing key (tools/release-sign keygen).
 const RELEASE_PUBLIC_KEY: &str = include_str!("../release-public-key.txt");

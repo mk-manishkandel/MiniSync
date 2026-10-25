@@ -149,7 +149,7 @@ If one is away, changes wait and sync when it's back.
 | *Mini Sync - connected to …* | Status |
 | *Check for updates* / *Install update vX* | See [Updates](#updates) |
 | *Open Mini Sync…* | Opens the menu below |
-| *Open synced folder* · *View log* | Shortcuts |
+| *Open synced folder* · *View log* · *Help and GitHub page* | Shortcuts |
 | *Quit* | Stops until next login |
 
 **Menu** (tray → *Open Mini Sync…*). Type a number; every action opens on its own page, and each
@@ -157,7 +157,7 @@ prompt says what **Enter** does:
 
 ```
   ╭────────────────────────────────────╮
-  │  Mini Sync  v0.3.4                 │
+  │  Mini Sync  v0.3.5                 │
   │  ● Running in the background       │
   │  ✉ 1 folder invitation - choose 6  │
   ╰────────────────────────────────────╯
@@ -188,8 +188,11 @@ prompt says what **Enter** does:
     9  View log                    12  Change this device's ID
    10  Restart                     13  Uninstall
    11  Stop until next login       14  Check for updates
+   15  Help & GitHub page
 
     0  Close this window (syncing keeps running)
+
+  Help & source code: https://github.com/mk-manishkandel/MiniSync
 ```
 
 When a newer version is out, the header also shows **↑ Update vX available - choose 14**.
