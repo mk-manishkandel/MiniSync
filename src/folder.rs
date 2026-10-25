@@ -8,11 +8,12 @@ use crate::proto::{FileInfo, Kind, Message, Order};
 use crate::scan::{self, Index};
 use crate::util;
 use anyhow::{anyhow, bail, Context, Result};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 
@@ -35,6 +36,45 @@ pub struct Folder {
     /// File lines logged in the current scan or pull (see `note`).
     noted: usize,
     me: u64,
+    /// Why the folder can't sync right now (missing folder or marker).
+    error: Option<String>,
+    /// Changes from the last pull that could not be applied yet.
+    not_received: u64,
+}
+
+/// What a folder is doing, shown in the menu and the tray. The background
+/// process keeps it in the hub and writes it to `status.json`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct FolderStatus {
+    pub state: SyncState,
+    /// Devices this folder syncs with that are not connected.
+    pub waiting_for: Vec<String>,
+    /// While receiving: progress of the current round.
+    pub files_done: u64,
+    pub files_total: u64,
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+    /// Connected devices still missing some of our files: (name, files, bytes).
+    pub behind: Vec<(String, u64, u64)>,
+    pub not_received: u64,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SyncState {
+    #[default]
+    Scanning,
+    /// None of the devices it syncs with is connected.
+    Waiting,
+    /// Connected, still getting the other device's file list.
+    Comparing,
+    Receiving,
+    /// Another device is still getting files from us.
+    Sending,
+    /// Some received changes could not be applied (see the log).
+    Incomplete,
+    UpToDate,
+    Error,
 }
 
 enum Action {
@@ -49,14 +89,29 @@ impl Folder {
     pub fn new(id: String, root: PathBuf, ignores: Vec<String>, index_path: PathBuf, hub: Arc<Hub>) -> Folder {
         let index = scan::load_index(&index_path);
         let me = hub.me.short();
-        Folder { id, root, ignores, index_path, hub, index, remote: HashMap::new(), complete: HashSet::new(), noted: 0, me }
+        Folder {
+            id,
+            root,
+            ignores,
+            index_path,
+            hub,
+            index,
+            remote: HashMap::new(),
+            complete: HashSet::new(),
+            noted: 0,
+            me,
+            error: None,
+            not_received: 0,
+        }
     }
 
     pub async fn run(mut self, mut events: mpsc::Receiver<FolderEvent>) {
+        self.set_status(FolderStatus::default());
         if let Err(e) = self.prepare_root() {
             log::error!("[{}] {e:#}", self.id);
         }
         self.scan().await;
+        self.refresh_status();
         let mut pull_tick = tokio::time::interval(Duration::from_secs(60));
         let mut scan_tick = tokio::time::interval(Duration::from_secs(300));
         pull_tick.tick().await;
@@ -88,7 +143,72 @@ impl Folder {
                 _ = pull_tick.tick() => self.pull().await,
                 _ = scan_tick.tick() => { self.scan().await; self.pull().await; }
             }
+            self.refresh_status();
         }
+    }
+
+    fn set_status(&self, s: FolderStatus) {
+        self.hub.status.lock().unwrap().insert(self.id.clone(), s);
+    }
+
+    fn update_status(&self, f: impl FnOnce(&mut FolderStatus)) {
+        if let Some(s) = self.hub.status.lock().unwrap().get_mut(&self.id) {
+            f(s);
+        }
+    }
+
+    /// Works out the folder's state when it is not in the middle of receiving.
+    fn refresh_status(&self) {
+        let mut s = FolderStatus { not_received: self.not_received, ..Default::default() };
+        if let Some(e) = &self.error {
+            s.state = SyncState::Error;
+            s.error = e.clone();
+            return self.set_status(s);
+        }
+        let Some(rule) = self.hub.rule(&self.id) else { return };
+        let devices: Vec<DeviceId> = match rule.owner {
+            Some(o) => vec![o],
+            None => rule.shares.keys().copied().collect(),
+        };
+        let connected = self.hub.connected();
+        let (online, offline): (Vec<DeviceId>, Vec<DeviceId>) = devices.into_iter().partition(|d| connected.contains(d));
+        s.waiting_for = offline.iter().map(|d| self.hub.peer_name(d)).collect();
+        s.waiting_for.sort();
+        for peer in &online {
+            // Only devices that may send us changes report what they have.
+            if !rule.accepts_from(peer) || !self.complete.contains(peer) || !rule.can_send_to(peer) {
+                continue;
+            }
+            let theirs = self.remote.get(peer);
+            let (mut files, mut bytes) = (0, 0);
+            for l in self.index.values() {
+                let missing = match theirs.and_then(|t| t.get(&l.name)) {
+                    None => !l.deleted,
+                    Some(r) => l.version.compare(&r.version) == Order::Greater && !l.same_content(r),
+                };
+                if missing {
+                    files += 1;
+                    if !l.deleted {
+                        bytes += l.size;
+                    }
+                }
+            }
+            if files > 0 {
+                s.behind.push((self.hub.peer_name(peer), files, bytes));
+            }
+        }
+        s.state = if online.is_empty() {
+            SyncState::Waiting
+        } else if online.iter().any(|p| rule.accepts_from(p) && !self.complete.contains(p)) {
+            SyncState::Comparing
+        } else if !s.behind.is_empty() {
+            SyncState::Sending
+        } else if self.not_received > 0 {
+            SyncState::Incomplete
+        } else {
+            SyncState::UpToDate
+        };
+        self.set_status(s);
     }
 
     fn prepare_root(&self) -> Result<()> {
@@ -128,6 +248,7 @@ impl Folder {
             }
         };
         self.index = index;
+        self.error = result.as_ref().err().map(|e| format!("{e:#}"));
         match result {
             Ok(changed) if !changed.is_empty() => {
                 let read_only = self.hub.rule(&self.id).and_then(|r| r.read_only_owner()).is_some();
@@ -251,6 +372,7 @@ impl Folder {
             self.remove_local_extras(owner);
         }
         if wanted.is_empty() {
+            self.not_received = 0;
             return;
         }
         let mut todo: Vec<(DeviceId, FileInfo)> = wanted.into_values().collect();
@@ -262,30 +384,54 @@ impl Folder {
             })
         });
 
+        let size_of = |f: &FileInfo| if f.deleted || f.kind != Kind::File { 0 } else { f.size };
+        let files_total = todo.len() as u64;
+        let bytes_total: u64 = todo.iter().map(|(_, f)| size_of(f)).sum();
+        self.update_status(|s| {
+            s.state = SyncState::Receiving;
+            (s.files_done, s.files_total, s.bytes_done, s.bytes_total) = (0, files_total, 0, bytes_total);
+        });
+
         let mut needs_scan = false;
+        let mut not_received = 0;
+        let (mut files_done, mut bytes_done) = (0, 0);
+        let mut last_flush = Instant::now();
         for (peer, r) in todo {
-            let Some(action) = self.decide(&r, read_only.is_some()) else { continue };
-            let result = match action {
-                Action::Record(f) => {
-                    self.index.insert(f.name.clone(), f.clone());
-                    changed.push(f);
-                    Ok(())
-                }
-                Action::Apply | Action::ApplyConflict => {
-                    let conflict = matches!(action, Action::ApplyConflict);
-                    if !self.disk_matches_index(&r.name) {
-                        needs_scan = true; // local edit we have not scanned yet
-                        continue;
+            if let Some(action) = self.decide(&r, read_only.is_some()) {
+                let result = match action {
+                    Action::Record(f) => {
+                        self.index.insert(f.name.clone(), f.clone());
+                        changed.push(f);
+                        Ok(())
                     }
-                    self.apply(peer, &r, conflict, &mut changed).await
-                }
-            };
-            if let Err(e) = result {
-                if crate::logfile::throttle(&format!("pull-{}-{}", self.id, r.name), crate::logfile::REPEAT) {
-                    log::warn!("[{}] {}: {e:#}", self.id, r.name);
+                    Action::Apply | Action::ApplyConflict if !self.disk_matches_index(&r.name) => {
+                        needs_scan = true; // local edit we have not scanned yet
+                        Ok(())
+                    }
+                    Action::Apply | Action::ApplyConflict => {
+                        let conflict = matches!(action, Action::ApplyConflict);
+                        self.apply(peer, &r, conflict, &mut changed).await
+                    }
+                };
+                if let Err(e) = result {
+                    not_received += 1;
+                    if crate::logfile::throttle(&format!("pull-{}-{}", self.id, r.name), crate::logfile::REPEAT) {
+                        log::warn!("[{}] {}: {e:#}", self.id, r.name);
+                    }
                 }
             }
+            files_done += 1;
+            bytes_done += size_of(&r);
+            self.update_status(|s| (s.files_done, s.bytes_done) = (files_done, bytes_done));
+            // Tell the other devices what we have so far, so their view of
+            // the transfer moves too (and a restart resumes from here).
+            if last_flush.elapsed() >= Duration::from_secs(3) && !changed.is_empty() {
+                self.save();
+                self.broadcast(std::mem::take(&mut changed)).await;
+                last_flush = Instant::now();
+            }
         }
+        self.not_received = not_received;
         self.end_round("received changes");
         if !changed.is_empty() {
             self.save();
@@ -431,6 +577,7 @@ impl Folder {
                 hasher.update(&data);
                 file.write_all(&data).await?;
                 offset += data.len() as u64;
+                self.update_status(|s| s.bytes_done += data.len() as u64);
             }
             file.flush().await?;
             file.sync_all().await?;

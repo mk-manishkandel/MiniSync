@@ -171,10 +171,13 @@ prompt says what **Enter** does:
   FOLDERS
     MiniSync   C:\Users\me\MiniSync
                You share it with laptop (read & write), family-mac (read only)
+               ✓ Up to date · family-mac not connected
     Photos     C:\Users\me\Photos
                Not shared with any device yet → choose 5
+               ○ Not synced with any device yet
     Work       C:\Users\me\Work
                Shared with you by laptop · you can only read
+               ↓ Receiving ███████░░░░░░░░░░░░░  38%  120 of 310 files · 1.2 GB of 3.1 GB
 
   ────────────────────────────────────────────────────────────────
 
@@ -184,6 +187,7 @@ prompt says what **Enter** does:
     3  Remove a device              6  Invitations (1 new)
                                     7  Remove a folder
                                     8  Open a synced folder
+                                   17  Sync progress (live)
 
   APP                              SECURITY & UPDATES
     9  View log                    12  Change this device's ID
@@ -195,6 +199,10 @@ prompt says what **Enter** does:
 
   Help & source code: https://github.com/mk-manishkandel/MiniSync
 ```
+
+Each folder's last line shows whether it is in sync: **✓ Up to date**, **↓ Receiving** (with
+progress), **↑ Sending** (another device is still getting files from this one), or waiting for a
+device to connect. Choose **17** to watch it update live; the first line of the tray menu shows the same in short.
 
 When a newer version is out, the header also shows **↑ Update vX available - choose 14**.
 

@@ -417,6 +417,9 @@ async fn run(home: Home, listener: std::net::TcpListener, status: Option<Arc<std
         if !f.path.exists() && !home.index_path(&f.id).exists() {
             if let Err(e) = std::fs::create_dir_all(&f.path) {
                 log::error!("[{}] cannot create {} ({e}); this folder is not synced until it is fixed (menu -> 7 to remove it)", f.id, f.path.display());
+                let error = format!("cannot create {} ({e})", f.path.display());
+                let status = folder::FolderStatus { state: folder::SyncState::Error, error, ..Default::default() };
+                hub.status.lock().unwrap().insert(f.id.clone(), status);
                 continue;
             }
         }
@@ -439,6 +442,9 @@ async fn run(home: Home, listener: std::net::TcpListener, status: Option<Arc<std
                 } else {
                     format!("connected to {}", names.join(", "))
                 };
+                if let Some(sync) = sync_summary(&hub.status.lock().unwrap()) {
+                    text.push_str(&format!(" - {sync}"));
+                }
                 match hub.invites.load(std::sync::atomic::Ordering::Relaxed) {
                     0 => {}
                     1 => text.push_str(" - 1 folder invitation"),
@@ -446,6 +452,24 @@ async fn run(home: Home, listener: std::net::TcpListener, status: Option<Arc<std
                 }
                 *status.lock().unwrap() = text;
                 tokio::time::sleep(Duration::from_secs(3)).await;
+            }
+        });
+    }
+    // The menu runs as a separate program; it reads folder progress from here.
+    {
+        let hub = hub.clone();
+        let path = home.status_path();
+        tokio::spawn(async move {
+            let mut last = String::new();
+            loop {
+                let json = serde_json::to_string(&*hub.status.lock().unwrap()).unwrap_or_default();
+                if json != last {
+                    let tmp = path.with_extension("tmp");
+                    if std::fs::write(&tmp, &json).and_then(|_| std::fs::rename(&tmp, &path)).is_ok() {
+                        last = json;
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
         });
     }
@@ -458,6 +482,30 @@ async fn run(home: Home, listener: std::net::TcpListener, status: Option<Arc<std
             Ok(())
         }
     }
+}
+
+/// One line for the tray: what is happening across all folders, if anything.
+fn sync_summary(status: &std::collections::BTreeMap<String, folder::FolderStatus>) -> Option<String> {
+    use folder::SyncState;
+    let (mut done, mut total) = (0, 0);
+    for s in status.values().filter(|s| s.state == SyncState::Receiving) {
+        done += s.bytes_done.min(s.bytes_total);
+        total += s.bytes_total;
+    }
+    if status.values().any(|s| s.state == SyncState::Receiving) {
+        let pct = if total > 0 { done * 100 / total } else { 0 };
+        return Some(format!("receiving files ({pct}%)"));
+    }
+    if status.values().any(|s| s.state == SyncState::Sending) {
+        return Some("sending files".into());
+    }
+    if status.values().any(|s| matches!(s.state, SyncState::Error | SyncState::Incomplete)) {
+        return Some("a folder needs attention".into());
+    }
+    if !status.is_empty() && status.values().all(|s| s.state == SyncState::UpToDate) {
+        return Some("up to date".into());
+    }
+    None
 }
 
 /// Watches a folder and sends one Scan after changes have been quiet for 2s.

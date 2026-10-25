@@ -3,10 +3,11 @@
 //! LAN discovery by UDP broadcast, and the connection registry ("hub").
 
 use crate::config::{Access, DeviceId, Home, Invite, Keypair, NOISE_PARAMS};
+use crate::folder::FolderStatus;
 use crate::proto::{self, FileInfo, Message, Offer};
 use crate::util;
 use anyhow::{anyhow, bail, Result};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Seek, SeekFrom};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
@@ -94,6 +95,8 @@ pub struct Hub {
     home_dir: PathBuf,
     /// Invitations waiting for an answer (shown in the tray).
     pub invites: AtomicUsize,
+    /// What each folder is doing (shown in the menu and the tray).
+    pub status: Mutex<BTreeMap<String, FolderStatus>>,
     conns: Mutex<HashMap<DeviceId, Conn>>,
     discovered: Mutex<HashMap<DeviceId, SocketAddr>>,
     dial_now: tokio::sync::Notify,
@@ -121,6 +124,7 @@ impl Hub {
             rules: Mutex::new(rules),
             home_dir,
             invites: AtomicUsize::new(invites),
+            status: Mutex::new(BTreeMap::new()),
             conns: Mutex::new(HashMap::new()),
             discovered: Mutex::new(HashMap::new()),
             dial_now: tokio::sync::Notify::new(),

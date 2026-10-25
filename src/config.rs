@@ -279,6 +279,11 @@ impl Home {
         self.dir.join("config.toml")
     }
 
+    /// Folder progress, written by the background process for the menu.
+    pub fn status_path(&self) -> PathBuf {
+        self.dir.join("status.json")
+    }
+
     pub fn key_path(&self) -> PathBuf {
         self.dir.join("key.bin")
     }

@@ -5,12 +5,14 @@
 //! defaults: a choice that creates or shares something must be typed.
 
 use crate::config::{Access, Config, DeviceId, FolderConfig, Home, Invite, PeerConfig};
+use crate::folder::{FolderStatus, SyncState};
 use crate::service;
 use crate::ui;
 use crate::update::{self, Release};
 use anyhow::Result;
 use std::io::{BufRead, Write};
 use std::path::Path;
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 /// Result of the update check started when the menu opens.
@@ -278,7 +280,124 @@ fn ask_peer(me: &DeviceId, none: &str) -> Option<PeerConfig> {
 
 // ---------------- main menu ----------------
 
-fn draw(cfg: &Config, key: &DeviceId, running: bool, upd: &UpdateInfo) {
+/// Each folder with its path, who it is shared with and its sync status.
+fn print_folders(cfg: &Config, status: &Option<BTreeMap<String, FolderStatus>>) {
+    let width = cfg.folders.iter().map(|f| f.label().chars().count()).max().unwrap_or(0).clamp(8, 18);
+    for f in &cfg.folders {
+        let mut name: String = f.label().chars().take(width).collect();
+        let pad = width - name.chars().count();
+        name = format!("{}{}", ui::bold(&name), " ".repeat(pad));
+        println!("    {name}   {}", ui::dim(&f.path.display().to_string()));
+        println!("    {}   {}", " ".repeat(width), folder_role(cfg, f));
+        let line = match status {
+            None => ui::dim("○ Not syncing - Mini Sync is stopped (choose 10)"),
+            Some(all) => status_line(all.get(&f.id)),
+        };
+        println!("    {}   {line}", " ".repeat(width));
+    }
+}
+
+/// Folder progress from the background process; None if it isn't running.
+fn load_status(home: &Home, running: bool) -> Option<BTreeMap<String, FolderStatus>> {
+    if !running {
+        return None;
+    }
+    let text = std::fs::read_to_string(home.status_path()).unwrap_or_default();
+    Some(serde_json::from_str(&text).unwrap_or_default())
+}
+
+fn status_line(s: Option<&FolderStatus>) -> String {
+    let Some(s) = s else { return ui::dim("… Starting") };
+    let others = |prefix: &str| {
+        if s.waiting_for.is_empty() {
+            String::new()
+        } else {
+            ui::dim(&format!("{prefix}{} not connected", s.waiting_for.join(", ")))
+        }
+    };
+    match s.state {
+        SyncState::Scanning => ui::dim("… Checking the files on this device"),
+        SyncState::Waiting if s.waiting_for.is_empty() => ui::dim("○ Not synced with any device yet"),
+        SyncState::Waiting => ui::dim(&format!("○ Waiting for {} to connect", s.waiting_for.join(", "))),
+        SyncState::Comparing => ui::yellow("… Comparing files with your other device"),
+        SyncState::Receiving => {
+            let (done, total) = if s.bytes_total > 0 {
+                (s.bytes_done.min(s.bytes_total), s.bytes_total)
+            } else {
+                (s.files_done, s.files_total.max(1))
+            };
+            let pct = done * 100 / total;
+            let mut text = format!("↓ Receiving {} {pct:>3}%  {} of {} files", bar(pct), s.files_done, s.files_total);
+            if s.bytes_total > 0 {
+                text.push_str(&format!(" · {} of {}", size_text(s.bytes_done.min(s.bytes_total)), size_text(s.bytes_total)));
+            }
+            ui::yellow(&text)
+        }
+        SyncState::Sending => {
+            let list: Vec<String> = s
+                .behind
+                .iter()
+                .map(|(name, files, bytes)| format!("{name} still needs {files} file{} ({})", if *files == 1 { "" } else { "s" }, size_text(*bytes)))
+                .collect();
+            ui::yellow(&format!("↑ Sending - {}", list.join(", ")))
+        }
+        SyncState::Incomplete => ui::red(&format!("! {} change{} could not be received yet - see the log (9)", s.not_received, if s.not_received == 1 { "" } else { "s" })),
+        SyncState::UpToDate => format!("{}{}", ui::green("✓ Up to date"), others(" · ")),
+        SyncState::Error => ui::red(&format!("✗ Not syncing: {}", s.error)),
+    }
+}
+
+fn bar(pct: u64) -> String {
+    let filled = (pct.min(100) / 5) as usize;
+    format!("{}{}", "█".repeat(filled), "░".repeat(20 - filled))
+}
+
+fn size_text(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut v = bytes as f64;
+    let mut unit = 0;
+    while v >= 1024.0 && unit < UNITS.len() - 1 {
+        v /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{v:.1} {}", UNITS[unit])
+    }
+}
+
+/// Live view of every folder's status, refreshed every second until Enter.
+fn live_progress(home: &Home) -> Result<()> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(read_line());
+    });
+    let mut running = false;
+    for tick in 0u64.. {
+        let cfg = home.load_config()?;
+        // Each check opens a connection to the background process, so not every second.
+        if tick % 5 == 0 {
+            running = service::is_running(cfg.listen_port);
+        }
+        ui::page("Sync progress");
+        println!();
+        if cfg.folders.is_empty() {
+            ui::info("There are no folders yet.");
+        }
+        print_folders(&cfg, &load_status(home, running));
+        println!();
+        ui::info("Updates every second.");
+        ui::prompt(&format!("{} ", ui::dim("Press Enter to go back")));
+        let _ = std::io::stdout().flush();
+        if rx.recv_timeout(std::time::Duration::from_secs(1)).is_ok() {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn draw(home: &Home, cfg: &Config, key: &DeviceId, running: bool, upd: &UpdateInfo) {
     ui::clear();
     let (status_plain, status) = if running {
         ("● Running in the background".to_string(), ui::green("● Running in the background"))
@@ -319,14 +438,7 @@ fn draw(cfg: &Config, key: &DeviceId, running: bool, upd: &UpdateInfo) {
     if cfg.folders.is_empty() {
         println!("    {}", ui::yellow("None yet → choose 4 to share one, or 6 to join one"));
     }
-    let width = cfg.folders.iter().map(|f| f.label().chars().count()).max().unwrap_or(0).clamp(8, 18);
-    for f in &cfg.folders {
-        let mut name: String = f.label().chars().take(width).collect();
-        let pad = width - name.chars().count();
-        name = format!("{}{}", ui::bold(&name), " ".repeat(pad));
-        println!("    {name}   {}", ui::dim(&f.path.display().to_string()));
-        println!("    {}   {}", " ".repeat(width), folder_role(cfg, f));
-    }
+    print_folders(cfg, &load_status(home, running));
     println!("\n  {}", ui::dim(&"─".repeat(64)));
 
     let invites = match cfg.pending_invites() {
@@ -348,6 +460,7 @@ fn draw(cfg: &Config, key: &DeviceId, running: bool, upd: &UpdateInfo) {
     row(("3", "Remove a device"), ("6", &invites));
     row(("", ""), ("7", "Remove a folder"));
     row(("", ""), ("8", "Open a synced folder"));
+    row(("", ""), ("17", "Sync progress (live)"));
 
     ui::section("App                              Security & updates");
     row(("9", "View log"), ("12", "Change this device's ID"));
@@ -380,7 +493,7 @@ fn menu(home: &Home) -> Result<()> {
         let key = home.load_or_create_key()?;
         let running = service::is_running(cfg.listen_port);
         let upd_now = upd.lock().unwrap().clone();
-        draw(&cfg, &key.public, running, &upd_now);
+        draw(home, &cfg, &key.public, running, &upd_now);
 
         ui::prompt("Choose a number: ");
         let choice = read_line();
@@ -414,6 +527,7 @@ fn menu(home: &Home) -> Result<()> {
             },
             "9" => service::open_path(&service::log_path(home)),
             "15" => service::open_path(std::path::Path::new(update::WEBSITE)),
+            "17" => live_progress(home)?,
             #[cfg(windows)]
             "16" => {
                 ui::page("Allow through firewall");
