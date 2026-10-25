@@ -83,6 +83,42 @@ pub fn safe_join(root: &Path, name: &str) -> Option<PathBuf> {
     Some(path)
 }
 
+/// Removes the quotes a terminal puts around a dragged-in path with spaces
+/// ("C:\My Files" on Windows, '/Users/me/My Files' on macOS).
+pub fn strip_quotes(s: &str) -> &str {
+    let mut s = s.trim();
+    while s.len() >= 2 && (s.starts_with('"') && s.ends_with('"') || s.starts_with('\'') && s.ends_with('\'')) {
+        s = s[1..s.len() - 1].trim();
+    }
+    s
+}
+
+/// Turns a typed, pasted or dragged-in folder path into a real path: drops
+/// quotes, undoes macOS Terminal's backslash escapes ("My\ Files") and
+/// expands a leading "~".
+pub fn clean_path(input: &str) -> PathBuf {
+    let trimmed = input.trim();
+    let unquoted = strip_quotes(trimmed);
+    let mut s = unquoted.to_string();
+    if !cfg!(windows) && unquoted.len() == trimmed.len() {
+        let mut out = String::with_capacity(s.len());
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' => out.extend(chars.next()),
+                c => out.push(c),
+            }
+        }
+        s = out;
+    }
+    if s == "~" || s.starts_with("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(s[1..].trim_start_matches('/'));
+        }
+    }
+    PathBuf::from(s)
+}
+
 pub fn mtime_secs(meta: &std::fs::Metadata) -> i64 {
     meta.modified()
         .ok()
@@ -128,5 +164,19 @@ mod tests {
         assert!(safe_join(root, "a//b").is_none());
         assert!(safe_join(root, ".minisync-tmp/x").is_none());
         assert!(safe_join(root, "a/b.txt").is_some());
+    }
+
+    #[test]
+    fn clean_path_handles_dragged_paths() {
+        assert_eq!(clean_path("  '/Users/me/Desktop/untitled folder' "), PathBuf::from("/Users/me/Desktop/untitled folder"));
+        assert_eq!(clean_path("\"C:\\My Files\""), PathBuf::from("C:\\My Files"));
+        assert_eq!(clean_path("/plain/path"), PathBuf::from("/plain/path"));
+        if !cfg!(windows) {
+            assert_eq!(clean_path("/Users/me/untitled\\ folder "), PathBuf::from("/Users/me/untitled folder"));
+            assert_eq!(clean_path("'/odd\\name'"), PathBuf::from("/odd\\name"));
+        }
+        if let Some(home) = dirs::home_dir() {
+            assert_eq!(clean_path("~/MiniSync"), home.join("MiniSync"));
+        }
     }
 }

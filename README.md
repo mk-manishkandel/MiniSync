@@ -103,8 +103,9 @@ Adding a device later (menu → **2**) works the same way: after its ID and name
 your folders whether that device gets it, and with what access.
 
 Setup ends with a short **What's next** list. Allow network access when asked
-(Windows: firewall prompt → *Allow*; Mac: *Local Network* → *Allow*). Mini Sync then runs in the
-background and starts at every login.
+(Windows: Mini Sync adds its firewall rule and Windows asks for permission → *Yes*, or later
+menu → **16**; Mac: *Local Network* → *Allow*). Mini Sync then runs in the background and starts
+at every login.
 
 **Join the folder:** on the other device, once both are connected, the menu header shows
 **✉ 1 folder invitation**. Open the menu → **6** → **Accept** → press Enter for the suggested
@@ -188,7 +189,7 @@ prompt says what **Enter** does:
     9  View log                    12  Change this device's ID
    10  Restart                     13  Uninstall
    11  Stop until next login       14  Check for updates
-   15  Help & GitHub page
+   15  Help & GitHub page          16  Allow through firewall
 
     0  Close this window (syncing keeps running)
 
@@ -270,7 +271,7 @@ once every 10 minutes, and big syncs list the first 20 files and then a summary 
 | `could not talk to X` | The other device runs an older Mini Sync. Update it (menu → 14) |
 | A device doesn't get a folder | On the folder's owner: menu → 5 → give that device access. Then accept the invitation on the device (6) |
 | `already running (port 22100 is in use)` | Only one copy runs per computer; use the tray icon |
-| nothing connects | Same Wi-Fi? Firewall / Local Network allowed? Try a fixed address: `minisync add-peer NAME ID --address 192.168.x.x:22100` |
+| nothing connects | Same Wi-Fi? Windows: menu → **16** (firewall). Mac: Local Network allowed? Try a fixed address: `minisync add-peer NAME ID --address 192.168.x.x:22100` |
 
 ## Command line
 

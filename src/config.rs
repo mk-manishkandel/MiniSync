@@ -348,6 +348,19 @@ impl Home {
             cfg.version = CONFIG_VERSION;
             self.save_config(&cfg)?;
         }
+        // Versions up to 0.3.5 saved dragged-in paths with their quotes.
+        let mut repaired = false;
+        for f in &mut cfg.folders {
+            let raw = f.path.to_string_lossy().to_string();
+            let clean = crate::util::strip_quotes(&raw);
+            if clean != raw {
+                f.path = PathBuf::from(clean);
+                repaired = true;
+            }
+        }
+        if repaired {
+            self.save_config(&cfg)?;
+        }
         Ok(cfg)
     }
 

@@ -412,8 +412,13 @@ async fn run(home: Home, listener: std::net::TcpListener, status: Option<Arc<std
 
     let mut watchers = Vec::new();
     for (f, tx, rx) in receivers {
+        // A folder that can't be created is skipped (and logged), so the other
+        // folders and the connection to your devices keep working.
         if !f.path.exists() && !home.index_path(&f.id).exists() {
-            std::fs::create_dir_all(&f.path).with_context(|| format!("creating {}", f.path.display()))?;
+            if let Err(e) = std::fs::create_dir_all(&f.path) {
+                log::error!("[{}] cannot create {} ({e}); this folder is not synced until it is fixed (menu -> 7 to remove it)", f.id, f.path.display());
+                continue;
+            }
         }
         match watch(&f.path, tx) {
             Ok(w) => watchers.push(w),

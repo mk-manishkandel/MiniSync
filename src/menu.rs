@@ -10,7 +10,7 @@ use crate::ui;
 use crate::update::{self, Release};
 use anyhow::Result;
 use std::io::{BufRead, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 /// Result of the update check started when the menu opens.
@@ -191,7 +191,7 @@ fn setup(home: &Home) -> Result<()> {
     if choose(&options, "skip") == Some(0) {
         let default_folder = dirs::home_dir().unwrap_or_default().join("MiniSync");
         ui::info("Type or drag in a folder, or press Enter for the suggested one (created if needed).");
-        let path = PathBuf::from(ask("Folder", &default_folder.display().to_string()));
+        let path = crate::util::clean_path(&ask("Folder", &default_folder.display().to_string()));
         let folder = FolderConfig::new_own(path);
         ui::ok(&format!("Added {}. Next, choose which device gets it.", folder.path.display()));
         cfg.folders.push(folder);
@@ -222,6 +222,8 @@ fn setup(home: &Home) -> Result<()> {
     }
 
     println!();
+    #[cfg(windows)]
+    firewall();
     ui::info("Starting Mini Sync in the background...");
     match service::install(home, cfg.listen_port) {
         Ok(_) => ui::ok("Mini Sync is running and starts automatically when you log in."),
@@ -351,7 +353,7 @@ fn draw(cfg: &Config, key: &DeviceId, running: bool, upd: &UpdateInfo) {
     row(("9", "View log"), ("12", "Change this device's ID"));
     row(("10", if running { "Restart" } else { "Start" }), ("13", "Uninstall"));
     row(("11", "Stop until next login"), ("14", "Check for updates"));
-    row(("15", "Help & GitHub page"), ("", ""));
+    row(("15", "Help & GitHub page"), if cfg!(windows) { ("16", "Allow through firewall") } else { ("", "") });
 
     println!("\n   {}  {}", ui::cyan(" 0"), ui::dim("Close this window (syncing keeps running)"));
     println!("\n  {}", ui::dim(&format!("Help & source code: {}", update::WEBSITE)));
@@ -412,6 +414,12 @@ fn menu(home: &Home) -> Result<()> {
             },
             "9" => service::open_path(&service::log_path(home)),
             "15" => service::open_path(std::path::Path::new(update::WEBSITE)),
+            #[cfg(windows)]
+            "16" => {
+                ui::page("Allow through firewall");
+                firewall();
+                pause();
+            }
             "10" => {
                 ui::page(if running { "Restart" } else { "Start" });
                 restart(home, &cfg);
@@ -573,7 +581,7 @@ fn add_folder(home: &Home, cfg: &Config) -> Result<()> {
     if path.is_empty() || path == "0" {
         return Ok(());
     }
-    let path = PathBuf::from(path);
+    let path = crate::util::clean_path(&path);
     if let Some(f) = cfg.folders.iter().find(|f| f.path == path) {
         ui::err(&format!("That folder is already synced ({}).", f.label()));
         pause();
@@ -669,6 +677,9 @@ fn invitations(home: &Home, cfg: &Config) -> Result<()> {
     if cfg.invites.is_empty() {
         ui::info("No invitations. When another device shares a folder with this one,");
         ui::info("it shows up here (both devices must be running and connected).");
+        if cfg!(windows) {
+            ui::info("If they never connect, Windows Firewall may be blocking Mini Sync: choose 16.");
+        }
         pause();
         return Ok(());
     }
@@ -721,7 +732,7 @@ fn accept(home: &Home, cfg: &Config, inv: &Invite) -> Result<()> {
     println!();
     ui::info(&format!("Where should {:?} be kept on this device?", inv.label));
     ui::info("Type or drag in a folder, or press Enter for the suggested one (created if needed).");
-    let path = PathBuf::from(ask("Folder", &default.display().to_string()));
+    let path = crate::util::clean_path(&ask("Folder", &default.display().to_string()));
     if !is_empty_dir(&path) {
         ui::warn(&format!("{} already has files in it.", path.display()));
         match inv.access {
@@ -775,6 +786,20 @@ fn remove_folder(home: &Home, cfg: &Config) -> Result<()> {
     }
     pause();
     Ok(())
+}
+
+/// Adds the Windows Firewall rule, explaining the permission prompt first.
+#[cfg(windows)]
+fn firewall() {
+    ui::info("Windows Firewall must let your other devices connect to this one.");
+    ui::info("Windows will ask for permission now - click Yes.");
+    match service::allow_through_firewall() {
+        Ok(()) => ui::ok("Mini Sync is allowed through Windows Firewall."),
+        Err(e) => {
+            ui::err(&format!("{e:#}"));
+            ui::info("Your other devices can't connect until this is done: menu -> 16.");
+        }
+    }
 }
 
 /// Restarts the background sync so a change takes effect.

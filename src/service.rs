@@ -262,6 +262,32 @@ fn stop_platform() {
     );
 }
 
+/// Lets your other devices reach this one through Windows Firewall. Replaces
+/// every rule for the installed program, including the "Block" rules Windows
+/// saves when its own "Allow access?" prompt is cancelled, with one Allow rule
+/// for all network types (connections are still only accepted from device IDs
+/// you added). Needs admin rights, so Windows asks first.
+#[cfg(windows)]
+pub fn allow_through_firewall() -> Result<()> {
+    let exe = installed_exe()?.display().to_string().replace('\'', "''");
+    let script = format!(
+        "$ErrorActionPreference='Stop'; $exe='{exe}'; \
+         Get-NetFirewallApplicationFilter | Where-Object {{ $_.Program -eq $exe }} | Get-NetFirewallRule | Remove-NetFirewallRule; \
+         New-NetFirewallRule -DisplayName 'Mini Sync' -Direction Inbound -Action Allow -Program $exe -Profile Any | Out-Null"
+    );
+    let utf16: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let encoded = data_encoding::BASE64.encode(&utf16);
+    let elevate = format!(
+        "$p = Start-Process powershell -Verb RunAs -Wait -PassThru -WindowStyle Hidden \
+         -ArgumentList '-NoProfile','-NonInteractive','-EncodedCommand','{encoded}'; exit $p.ExitCode"
+    );
+    let out = run_quiet("powershell", &["-NoProfile", "-NonInteractive", "-Command", &elevate])?;
+    if !out.status.success() {
+        bail!("Windows did not allow it (was the permission prompt declined?)");
+    }
+    Ok(())
+}
+
 #[cfg(windows)]
 fn start_menu_shortcut(exe: &Path, create: bool) -> Result<()> {
     let programs = dirs::data_dir()
