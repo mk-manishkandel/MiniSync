@@ -290,7 +290,7 @@ fn print_folders(cfg: &Config, status: &Option<BTreeMap<String, FolderStatus>>) 
         println!("    {name}   {}", ui::dim(&f.path.display().to_string()));
         println!("    {}   {}", " ".repeat(width), folder_role(cfg, f));
         let line = match status {
-            None => ui::dim("○ Not syncing - Mini Sync is stopped (choose 10)"),
+            None => ui::dim("○ Not syncing - Mini Sync is stopped (choose 11)"),
             Some(all) => status_line(all.get(&f.id)),
         };
         println!("    {}   {line}", " ".repeat(width));
@@ -341,7 +341,7 @@ fn status_line(s: Option<&FolderStatus>) -> String {
                 .collect();
             ui::yellow(&format!("↑ Sending - {}", list.join(", ")))
         }
-        SyncState::Incomplete => ui::red(&format!("! {} change{} could not be received yet - see the log (9)", s.not_received, if s.not_received == 1 { "" } else { "s" })),
+        SyncState::Incomplete => ui::red(&format!("! {} change{} could not be received yet - see the log (10)", s.not_received, if s.not_received == 1 { "" } else { "s" })),
         SyncState::UpToDate => format!("{}{}", ui::green("✓ Up to date"), others(" · ")),
         SyncState::Error => ui::red(&format!("✗ Not syncing: {}", s.error)),
     }
@@ -402,7 +402,7 @@ fn draw(home: &Home, cfg: &Config, key: &DeviceId, running: bool, upd: &UpdateIn
     let (status_plain, status) = if running {
         ("● Running in the background".to_string(), ui::green("● Running in the background"))
     } else {
-        ("● Not running - choose 10 to start".to_string(), ui::red("● Not running - choose 10 to start"))
+        ("● Not running - choose 11 to start".to_string(), ui::red("● Not running - choose 11 to start"))
     };
     let title_plain = format!("Mini Sync  v{}", update::CURRENT_VERSION);
     let title = format!("{}  {}", ui::accent("Mini Sync"), ui::dim(&format!("v{}", update::CURRENT_VERSION)));
@@ -416,7 +416,7 @@ fn draw(home: &Home, cfg: &Config, key: &DeviceId, running: bool, upd: &UpdateIn
     }
     match upd {
         UpdateInfo::Available(r) => {
-            let t = format!("↑ Update v{} available - choose 14", r.version);
+            let t = format!("↑ Update v{} available - choose 16", r.version);
             lines.push((t.clone(), ui::yellow(&t)));
         }
         UpdateInfo::Checking => lines.push(("Checking for updates...".into(), ui::dim("Checking for updates..."))),
@@ -460,13 +460,13 @@ fn draw(home: &Home, cfg: &Config, key: &DeviceId, running: bool, upd: &UpdateIn
     row(("3", "Remove a device"), ("6", &invites));
     row(("", ""), ("7", "Remove a folder"));
     row(("", ""), ("8", "Open a synced folder"));
-    row(("", ""), ("17", "Sync progress (live)"));
+    row(("", ""), ("9", "Sync progress (live)"));
 
     ui::section("App                              Security & updates");
-    row(("9", "View log"), ("12", "Change this device's ID"));
-    row(("10", if running { "Restart" } else { "Start" }), ("13", "Uninstall"));
-    row(("11", "Stop until next login"), ("14", "Check for updates"));
-    row(("15", "Help & GitHub page"), if cfg!(windows) { ("16", "Allow through firewall") } else { ("", "") });
+    row(("10", "View log"), ("14", "Change this device's ID"));
+    row(("11", if running { "Restart" } else { "Start" }), ("15", "Uninstall"));
+    row(("12", "Stop until next login"), ("16", "Check for updates"));
+    row(("13", "Help & GitHub page"), if cfg!(windows) { ("17", "Allow through firewall") } else { ("", "") });
 
     println!("\n   {}  {}", ui::cyan(" 0"), ui::dim("Close this window (syncing keeps running)"));
     println!("\n  {}", ui::dim(&format!("Help & source code: {}", update::WEBSITE)));
@@ -525,29 +525,23 @@ fn menu(home: &Home) -> Result<()> {
                     }
                 }
             },
-            "9" => service::open_path(&service::log_path(home)),
-            "15" => service::open_path(std::path::Path::new(update::WEBSITE)),
-            "17" => live_progress(home)?,
-            #[cfg(windows)]
-            "16" => {
-                ui::page("Allow through firewall");
-                firewall();
-                pause();
-            }
-            "10" => {
+            "9" => live_progress(home)?,
+            "10" => service::open_path(&service::log_path(home)),
+            "11" => {
                 ui::page(if running { "Restart" } else { "Start" });
                 restart(home, &cfg);
                 pause();
             }
-            "11" => {
+            "12" => {
                 ui::page("Stop syncing");
                 if confirm("Stop syncing until next login?") {
                     service::stop(cfg.listen_port);
-                    ui::ok("Stopped. It starts again at next login (or choose 10).");
+                    ui::ok("Stopped. It starts again at next login (or choose 11).");
                     pause();
                 }
             }
-            "12" => {
+            "13" => service::open_path(std::path::Path::new(update::WEBSITE)),
+            "14" => {
                 ui::page("Change this device's ID");
                 ui::info("This gives this device a new ID. The old ID stops working right away,");
                 ui::info("so your other devices stop syncing with it until you give them the new ID");
@@ -565,7 +559,7 @@ fn menu(home: &Home) -> Result<()> {
                     pause();
                 }
             }
-            "13" => {
+            "15" => {
                 ui::page("Uninstall");
                 ui::info("Removes Mini Sync, its settings and this device's ID from this computer.");
                 ui::info("Your synced files (and the .minisync-trash backup folder) are NOT deleted.");
@@ -577,7 +571,7 @@ fn menu(home: &Home) -> Result<()> {
                     return Ok(());
                 }
             }
-            "14" => {
+            "16" => {
                 ui::page("Updates");
                 ui::info(&format!("This is v{}. Checking GitHub...", update::CURRENT_VERSION));
                 match update::check() {
@@ -601,6 +595,12 @@ fn menu(home: &Home) -> Result<()> {
                     }
                     Err(e) => ui::err(&format!("Could not check: {e:#}")),
                 }
+                pause();
+            }
+            #[cfg(windows)]
+            "17" => {
+                ui::page("Allow through firewall");
+                firewall();
                 pause();
             }
             "0" | "q" => return Ok(()),
@@ -792,7 +792,7 @@ fn invitations(home: &Home, cfg: &Config) -> Result<()> {
         ui::info("No invitations. When another device shares a folder with this one,");
         ui::info("it shows up here (both devices must be running and connected).");
         if cfg!(windows) {
-            ui::info("If they never connect, Windows Firewall may be blocking Mini Sync: choose 16.");
+            ui::info("If they never connect, Windows Firewall may be blocking Mini Sync: choose 17.");
         }
         pause();
         return Ok(());
@@ -911,7 +911,7 @@ fn firewall() {
         Ok(()) => ui::ok("Mini Sync is allowed through Windows Firewall."),
         Err(e) => {
             ui::err(&format!("{e:#}"));
-            ui::info("Your other devices can't connect until this is done: menu -> 16.");
+            ui::info("Your other devices can't connect until this is done: menu -> 17.");
         }
     }
 }

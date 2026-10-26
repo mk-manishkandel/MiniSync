@@ -104,7 +104,7 @@ your folders whether that device gets it, and with what access.
 
 Setup ends with a short **What's next** list. Allow network access when asked
 (Windows: Mini Sync adds its firewall rule and Windows asks for permission → *Yes*, or later
-menu → **16**; Mac: *Local Network* → *Allow*). Mini Sync then runs in the background and starts
+menu → **17**; Mac: *Local Network* → *Allow*). Mini Sync then runs in the background and starts
 at every login.
 
 **Join the folder:** on the other device, once both are connected, the menu header shows
@@ -187,13 +187,13 @@ prompt says what **Enter** does:
     3  Remove a device              6  Invitations (1 new)
                                     7  Remove a folder
                                     8  Open a synced folder
-                                   17  Sync progress (live)
+                                    9  Sync progress (live)
 
   APP                              SECURITY & UPDATES
-    9  View log                    12  Change this device's ID
-   10  Restart                     13  Uninstall
-   11  Stop until next login       14  Check for updates
-   15  Help & GitHub page          16  Allow through firewall
+   10  View log                    14  Change this device's ID
+   11  Restart                     15  Uninstall
+   12  Stop until next login       16  Check for updates
+   13  Help & GitHub page          17  Allow through firewall
 
     0  Close this window (syncing keeps running)
 
@@ -202,9 +202,9 @@ prompt says what **Enter** does:
 
 Each folder's last line shows whether it is in sync: **✓ Up to date**, **↓ Receiving** (with
 progress), **↑ Sending** (another device is still getting files from this one), or waiting for a
-device to connect. Choose **17** to watch it update live; the first line of the tray menu shows the same in short.
+device to connect. Choose **9** to watch it update live; the first line of the tray menu shows the same in short.
 
-When a newer version is out, the header also shows **↑ Update vX available - choose 14**.
+When a newer version is out, the header also shows **↑ Update vX available - choose 16**.
 
 ## Updates
 
@@ -219,7 +219,7 @@ only once. On install, Mini Sync:
    (unsigned or modified files are refused),
 3. swaps it in and restarts. Your settings, device ID and files are kept.
 
-You can also update from the menu (*14*) or with `minisync update`.
+You can also update from the menu (*16*) or with `minisync update`.
 
 ## How it works
 
@@ -267,7 +267,7 @@ The log (`minisync.log`) never grows past about 6 MB: at 2 MB it moves to `minis
 then it is deleted). Warnings that would repeat, e.g. on every connection attempt, are written at most
 once every 10 minutes, and big syncs list the first 20 files and then a summary line.
 
-**Uninstall** (menu 13) removes the program, start-at-login, settings and device key. Synced files and
+**Uninstall** (menu 15) removes the program, start-at-login, settings and device key. Synced files and
 `.minisync-trash` are kept.
 
 ## Troubleshooting
@@ -276,10 +276,10 @@ once every 10 minutes, and big syncs list the first 20 files and then a summary 
 |---|---|
 | `unknown device XXXX… tried to connect` | That device has your ID but you don't have its ID yet → menu 2 |
 | `PC invites you to the folder ...` | Open the menu → 6 Invitations → Accept |
-| `could not talk to X` | The other device runs an older Mini Sync. Update it (menu → 14) |
+| `could not talk to X` | The other device runs an older Mini Sync. Update it (menu → 16) |
 | A device doesn't get a folder | On the folder's owner: menu → 5 → give that device access. Then accept the invitation on the device (6) |
 | `already running (port 22100 is in use)` | Only one copy runs per computer; use the tray icon |
-| nothing connects | Same Wi-Fi? Windows: menu → **16** (firewall). Mac: Local Network allowed? Try a fixed address: `minisync add-peer NAME ID --address 192.168.x.x:22100` |
+| nothing connects | Same Wi-Fi? Windows: menu → **17** (firewall). Mac: Local Network allowed? Try a fixed address: `minisync add-peer NAME ID --address 192.168.x.x:22100` |
 
 ## Command line
 
