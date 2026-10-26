@@ -1,6 +1,6 @@
 [package]
 name = "minisync"
-version = "0.3.10"
+version = "0.3.11"
 edition = "2021"
 description = "Minimal personal file sync between your own devices on the same network"
 repository = "https://github.com/mk-manishkandel/MiniSync"
@@ -29,6 +29,10 @@ walkdir = "2"
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 tao = "0.37"
 tray-icon = "0.26"
+
+# Writes the Start Menu shortcut directly (no PowerShell)
+[target.'cfg(windows)'.dependencies]
+mslnk = "0.1"
 
 [build-dependencies]
 embed-resource = "3"

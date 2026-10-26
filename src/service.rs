@@ -244,8 +244,90 @@ fn run_quiet(program: &str, args: &[&str]) -> Result<std::process::Output> {
 
 // ---------------- Windows ----------------
 
+/// The few Windows API calls used directly, instead of running helper
+/// programs (reg.exe, PowerShell) - antivirus ML models score those as
+/// malware-like, which got v0.3.8 and v0.3.10 flagged as a trojan.
 #[cfg(windows)]
-const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+mod win {
+    use std::ffi::c_void;
+
+    #[repr(C)]
+    pub struct ShellExecuteInfo {
+        pub size: u32,
+        pub mask: u32,
+        pub hwnd: *mut c_void,
+        pub verb: *const u16,
+        pub file: *const u16,
+        pub parameters: *const u16,
+        pub directory: *const u16,
+        pub show: i32,
+        pub inst_app: *mut c_void,
+        pub id_list: *mut c_void,
+        pub class: *const u16,
+        pub hkey_class: *mut c_void,
+        pub hot_key: u32,
+        pub icon_or_monitor: *mut c_void,
+        pub process: *mut c_void,
+    }
+
+    #[link(name = "advapi32")]
+    extern "system" {
+        pub fn RegOpenKeyExW(key: isize, sub_key: *const u16, options: u32, access: u32, result: *mut isize) -> i32;
+        pub fn RegSetValueExW(key: isize, name: *const u16, reserved: u32, kind: u32, data: *const u8, len: u32) -> i32;
+        pub fn RegDeleteValueW(key: isize, name: *const u16) -> i32;
+        pub fn RegCloseKey(key: isize) -> i32;
+    }
+
+    #[link(name = "shell32")]
+    extern "system" {
+        pub fn ShellExecuteExW(info: *mut ShellExecuteInfo) -> i32;
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        pub fn WaitForSingleObject(handle: *mut c_void, ms: u32) -> u32;
+        pub fn GetExitCodeProcess(handle: *mut c_void, code: *mut u32) -> i32;
+        pub fn CloseHandle(handle: *mut c_void) -> i32;
+    }
+
+    pub const HKEY_CURRENT_USER: isize = 0x8000_0001u32 as i32 as isize;
+    pub const KEY_SET_VALUE: u32 = 0x0002;
+    pub const REG_SZ: u32 = 1;
+    pub const SEE_MASK_NOCLOSEPROCESS: u32 = 0x40;
+    pub const INFINITE: u32 = u32::MAX;
+
+    /// NUL-terminated UTF-16 for the W functions.
+    pub fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(Some(0)).collect()
+    }
+}
+
+#[cfg(windows)]
+const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+
+/// Sets (`Some`) or removes (`None`) a start-at-login entry.
+#[cfg(windows)]
+fn set_run_value(name: &str, command: Option<&str>) -> Result<()> {
+    let mut key = 0isize;
+    let status = unsafe { win::RegOpenKeyExW(win::HKEY_CURRENT_USER, win::wide(RUN_KEY).as_ptr(), 0, win::KEY_SET_VALUE, &mut key) };
+    if status != 0 {
+        bail!("opening the start-at-login registry key failed (error {status})");
+    }
+    let name = win::wide(name);
+    let status = match command {
+        Some(cmd) => {
+            let data = win::wide(cmd);
+            unsafe { win::RegSetValueExW(key, name.as_ptr(), 0, win::REG_SZ, data.as_ptr().cast(), (data.len() * 2) as u32) }
+        }
+        None => unsafe { win::RegDeleteValueW(key, name.as_ptr()) },
+    };
+    unsafe { win::RegCloseKey(key) };
+    const ERROR_FILE_NOT_FOUND: i32 = 2;
+    if status != 0 && !(command.is_none() && status == ERROR_FILE_NOT_FOUND) {
+        bail!("writing the start-at-login registry entry failed (error {status})");
+    }
+    Ok(())
+}
 
 #[cfg(windows)]
 fn set_autostart(exe: &Path, home: &Home) -> Result<()> {
@@ -257,17 +339,12 @@ fn set_autostart(exe: &Path, home: &Home) -> Result<()> {
             command.push_str(&format!(" {a}"));
         }
     }
-    let out = run_quiet("reg", &["add", RUN_KEY, "/v", "MiniSync", "/t", "REG_SZ", "/d", &command, "/f"])?;
-    if !out.status.success() {
-        bail!("reg add failed: {}", String::from_utf8_lossy(&out.stderr));
-    }
-    Ok(())
+    set_run_value("MiniSync", Some(&command))
 }
 
 #[cfg(windows)]
 fn remove_autostart(_home: &Home) -> Result<()> {
-    let _ = run_quiet("reg", &["delete", RUN_KEY, "/v", "MiniSync", "/f"]);
-    Ok(())
+    set_run_value("MiniSync", None)
 }
 
 #[cfg(windows)]
@@ -295,28 +372,68 @@ fn stop_platform() {
     );
 }
 
-/// Lets your other devices reach this one through Windows Firewall. Replaces
-/// every rule for the installed program, including the "Block" rules Windows
-/// saves when its own "Allow access?" prompt is cancelled, with one Allow rule
-/// for all network types (connections are still only accepted from device IDs
-/// you added). Needs admin rights, so Windows asks first.
+/// Lets your other devices reach this one through Windows Firewall. Needs
+/// admin rights, so this runs a copy of this program "as administrator"
+/// (Windows asks first), which then calls `apply_firewall_rule`.
 #[cfg(windows)]
 pub fn allow_through_firewall() -> Result<()> {
-    let exe = installed_exe()?.display().to_string().replace('\'', "''");
-    let script = format!(
-        "$ErrorActionPreference='Stop'; $exe='{exe}'; \
-         Get-NetFirewallApplicationFilter | Where-Object {{ $_.Program -eq $exe }} | Get-NetFirewallRule | Remove-NetFirewallRule; \
-         New-NetFirewallRule -DisplayName 'Mini Sync' -Direction Inbound -Action Allow -Program $exe -Profile Any | Out-Null"
-    );
-    let utf16: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
-    let encoded = data_encoding::BASE64.encode(&utf16);
-    let elevate = format!(
-        "$p = Start-Process powershell -Verb RunAs -Wait -PassThru -WindowStyle Hidden \
-         -ArgumentList '-NoProfile','-NonInteractive','-EncodedCommand','{encoded}'; exit $p.ExitCode"
-    );
-    let out = run_quiet("powershell", &["-NoProfile", "-NonInteractive", "-Command", &elevate])?;
-    if !out.status.success() {
+    let exe = win::wide(&std::env::current_exe()?.display().to_string());
+    let verb = win::wide("runas");
+    let params = win::wide("allow-firewall");
+    let mut info = win::ShellExecuteInfo {
+        size: std::mem::size_of::<win::ShellExecuteInfo>() as u32,
+        mask: win::SEE_MASK_NOCLOSEPROCESS,
+        hwnd: std::ptr::null_mut(),
+        verb: verb.as_ptr(),
+        file: exe.as_ptr(),
+        parameters: params.as_ptr(),
+        directory: std::ptr::null(),
+        show: 0, // SW_HIDE
+        inst_app: std::ptr::null_mut(),
+        id_list: std::ptr::null_mut(),
+        class: std::ptr::null(),
+        hkey_class: std::ptr::null_mut(),
+        hot_key: 0,
+        icon_or_monitor: std::ptr::null_mut(),
+        process: std::ptr::null_mut(),
+    };
+    if unsafe { win::ShellExecuteExW(&mut info) } == 0 || info.process.is_null() {
         bail!("Windows did not allow it (was the permission prompt declined?)");
+    }
+    let mut code = 1u32;
+    unsafe {
+        win::WaitForSingleObject(info.process, win::INFINITE);
+        win::GetExitCodeProcess(info.process, &mut code);
+        win::CloseHandle(info.process);
+    }
+    if code != 0 {
+        bail!("adding the firewall rule failed");
+    }
+    Ok(())
+}
+
+/// Runs as administrator (see `allow_through_firewall`). Replaces every rule
+/// for the installed program, including the "Block" rules Windows saves when
+/// its own "Allow access?" prompt is cancelled, with one Allow rule for all
+/// network types (connections are still only accepted from device IDs you
+/// added).
+#[cfg(windows)]
+pub fn apply_firewall_rule() -> Result<()> {
+    use std::os::windows::process::CommandExt;
+    let exe = installed_exe()?.display().to_string();
+    let netsh = |args: String| -> Result<std::process::Output> {
+        let mut c = Command::new("netsh");
+        quiet(&mut c);
+        // raw_arg: netsh wants program="C:\path with spaces\minisync.exe" as is.
+        Ok(c.raw_arg(args).stdin(Stdio::null()).output()?)
+    };
+    // Fails harmlessly when there is no rule yet.
+    let _ = netsh(format!("advfirewall firewall delete rule name=all program=\"{exe}\""))?;
+    let out = netsh(format!(
+        "advfirewall firewall add rule name=\"Mini Sync\" dir=in action=allow program=\"{exe}\" enable=yes profile=any"
+    ))?;
+    if !out.status.success() {
+        bail!("netsh: {}", String::from_utf8_lossy(&out.stdout).trim());
     }
     Ok(())
 }
@@ -331,16 +448,9 @@ fn start_menu_shortcut(exe: &Path, create: bool) -> Result<()> {
         let _ = std::fs::remove_file(&lnk);
         return Ok(());
     }
-    let esc = |p: &Path| p.display().to_string().replace('\'', "''");
-    let script = format!(
-        "$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{}');$s.TargetPath='{}';$s.Description='Mini Sync';$s.Save()",
-        esc(&lnk),
-        esc(exe)
-    );
-    let out = run_quiet("powershell", &["-NoProfile", "-NonInteractive", "-Command", &script])?;
-    if !out.status.success() {
-        bail!("{}", String::from_utf8_lossy(&out.stderr));
-    }
+    let mut link = mslnk::ShellLink::new(exe)?;
+    link.set_name(Some("Mini Sync".into()));
+    link.create_lnk(&lnk)?;
     Ok(())
 }
 
@@ -449,4 +559,34 @@ fn start_platform(home: &Home) -> Result<()> {
 #[cfg(all(unix, not(target_os = "macos")))]
 fn stop_platform() {
     let _ = run_quiet("pkill", &["-f", "minisync.*run --background"]);
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_value_roundtrip() {
+        let read = || {
+            let out = Command::new("reg").args(["query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "/v", "MiniSyncTest"]).output().unwrap();
+            String::from_utf8_lossy(&out.stdout).to_string()
+        };
+        set_run_value("MiniSyncTest", Some(r#""C:\a b\x.exe" --home "C:\c d" run"#)).unwrap();
+        assert!(read().contains(r#""C:\a b\x.exe" --home "C:\c d" run"#));
+        set_run_value("MiniSyncTest", None).unwrap();
+        assert!(!read().contains("MiniSyncTest"));
+        set_run_value("MiniSyncTest", None).unwrap(); // removing twice is fine
+    }
+
+    #[test]
+    fn shortcut_file() {
+        let dir = std::env::temp_dir().join("minisync-lnk-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let lnk = dir.join("Mini Sync.lnk");
+        let mut link = mslnk::ShellLink::new(std::env::current_exe().unwrap()).unwrap();
+        link.set_name(Some("Mini Sync".into()));
+        link.create_lnk(&lnk).unwrap();
+        assert!(std::fs::metadata(&lnk).unwrap().len() > 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

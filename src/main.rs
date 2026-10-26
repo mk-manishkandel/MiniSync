@@ -118,6 +118,17 @@ enum Cmd {
     Stop,
     /// Is the background sync running?
     Status,
+    /// Add the Windows Firewall rule (run as administrator by the menu)
+    #[command(hide = true)]
+    AllowFirewall,
+    /// Put the previous version back if Windows blocks the new one (run after an update)
+    #[command(hide = true)]
+    CheckUpdate {
+        /// Where the previous version was moved
+        old: PathBuf,
+        #[arg(long)]
+        background: bool,
+    },
 }
 
 fn main() {
@@ -329,6 +340,16 @@ fn real_main(cli: Cli, background: bool) -> Result<()> {
             } else {
                 println!("Not running.");
             }
+        }
+        Cmd::AllowFirewall => {
+            #[cfg(windows)]
+            service::apply_firewall_rule()?;
+            #[cfg(not(windows))]
+            bail!("only needed on Windows");
+        }
+        Cmd::CheckUpdate { old, background: _ } => {
+            let cfg = home.load_config()?;
+            update::verify_or_roll_back(&home, cfg.listen_port, &old)?;
         }
     }
     Ok(())

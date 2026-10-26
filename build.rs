@@ -19,9 +19,38 @@ fn main() {
     let nums: Vec<&str> = version.split(['.', '-']).take(3).collect();
     let comma = format!("{},0", nums.join(","));
 
+    // A standard application manifest: runs as the normal user, declares
+    // Windows 10/11 support. (Antivirus models trust a bare exe less.)
+    let manifest = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity type="win32" name="MiniSync" version="1.0.0.0"/>
+  <description>Mini Sync</description>
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/>
+    </application>
+  </compatibility>
+</assembly>
+"#;
+    let manifest_path = out_dir.join("minisync.manifest");
+    std::fs::write(&manifest_path, manifest).unwrap();
+
+    // The GNU toolchain already embeds a default manifest; a second one fails to link.
+    let manifest_line = if msvc {
+        format!("1 24 \"{}\"\n", manifest_path.display().to_string().replace('\\', "/"))
+    } else {
+        String::new()
+    };
     let rc = format!(
         r#"1 ICON "{ico}"
-1 VERSIONINFO
+{manifest_line}1 VERSIONINFO
 FILEVERSION {comma}
 PRODUCTVERSION {comma}
 BEGIN
@@ -29,7 +58,9 @@ BEGIN
   BEGIN
     BLOCK "040904B0"
     BEGIN
-      VALUE "FileDescription", "minisync - sync folders between your devices"
+      VALUE "CompanyName", "mk-manishkandel"
+      VALUE "FileDescription", "Mini Sync - sync folders between your devices"
+      VALUE "LegalCopyright", "Copyright (c) 2026 mk-manishkandel"
       VALUE "ProductName", "Mini Sync"
       VALUE "FileVersion", "{version}"
       VALUE "ProductVersion", "{version}"

@@ -157,8 +157,10 @@ fn download_verified(rel: &Release) -> Result<PathBuf> {
 
 /// Puts the downloaded file in place of the installed program. Windows can't
 /// overwrite a running .exe but can rename it, so the old one is moved aside.
-fn swap_in(new: &Path) -> Result<PathBuf> {
+/// Returns the installed path and, on Windows, where the old version went.
+fn swap_in(new: &Path) -> Result<(PathBuf, Option<PathBuf>)> {
     let installed = service::installed_exe()?;
+    let mut moved = None;
     if cfg!(windows) && installed.exists() {
         // An older copy may still be running (e.g. a menu window that was left
         // open), which locks minisync.old.exe. Then use a fresh name instead.
@@ -168,9 +170,32 @@ fn swap_in(new: &Path) -> Result<PathBuf> {
             old = installed.with_file_name(format!("minisync.old-{stamp}.exe"));
         }
         std::fs::rename(&installed, &old).context("moving the old version aside")?;
+        moved = Some(old);
     }
     std::fs::rename(new, &installed).context("putting the new version in place")?;
-    Ok(installed)
+    Ok((installed, moved))
+}
+
+/// Windows antivirus sometimes blocks a new (unsigned) version a few seconds
+/// after it starts, and may also delete it. If the new version isn't running
+/// after about 25 seconds, or its file is gone, put the previous version back.
+pub fn verify_or_roll_back(home: &Home, port: u16, old: &Path) -> Result<()> {
+    let installed = service::installed_exe()?;
+    for _ in 0..25 {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        if !installed.exists() {
+            break;
+        }
+    }
+    if installed.exists() && service::is_running(port) {
+        return Ok(());
+    }
+    log::error!("the new version did not keep running (blocked by antivirus?); putting the previous version back");
+    service::stop(port);
+    let _ = std::fs::remove_file(&installed);
+    std::fs::rename(old, &installed).context("putting the previous version back")?;
+    service::start(home, port)?;
+    bail!("Windows blocked the new version (probably antivirus), so the previous version was put back")
 }
 
 /// Removes the previous version left behind by an update (best effort).
@@ -201,8 +226,12 @@ pub fn install_from_menu(home: &Home, port: u16, rel: &Release) -> Result<()> {
     }
     let new = download_verified(rel)?;
     service::stop(port);
-    swap_in(&new)?;
-    service::start(home, port)
+    let (_, old) = swap_in(&new)?;
+    let started = service::start(home, port);
+    match old {
+        Some(old) => verify_or_roll_back(home, port, &old),
+        None => started,
+    }
 }
 
 /// Update from the background process itself (tray). Swaps the file, starts
@@ -212,26 +241,34 @@ pub fn install_from_background(home: &Home, rel: &Release) -> Result<()> {
         bail!("this copy is not the installed one; update from the menu instead");
     }
     let new = download_verified(rel)?;
-    let installed = swap_in(&new)?;
+    let (installed, old) = swap_in(&new)?;
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         const DETACHED_PROCESS: u32 = 0x0000_0008;
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        Command::new(&installed)
-            .arg("--home")
-            .arg(&home.dir)
-            .args(["run", "--background", "--after-update"])
-            .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
+        let detached = |exe: &Path, args: &[&std::ffi::OsStr]| {
+            Command::new(exe)
+                .arg("--home")
+                .arg(&home.dir)
+                .args(args)
+                .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+        };
+        detached(&installed, &["run".as_ref(), "--background".as_ref(), "--after-update".as_ref()])
             .context("starting the new version")?;
+        // The previous version watches the new one from its moved-aside file and
+        // comes back if Windows blocks the new one (see verify_or_roll_back).
+        if let Some(old) = &old {
+            let _ = detached(old, &["check-update".as_ref(), "--background".as_ref(), old.as_os_str()]);
+        }
     }
     // macOS: launchd (KeepAlive) restarts the program from the new file once we exit.
     #[cfg(not(windows))]
-    let _ = (home, installed);
+    let _ = (home, installed, old);
     Ok(())
 }
 
