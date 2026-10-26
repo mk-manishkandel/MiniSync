@@ -77,6 +77,21 @@ jobs:
         run: |
           mkdir dist
           cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "dist/${{ matrix.asset }}"
+      # A false positive here makes Defender quarantine the installed app on
+      # every PC that auto-updates (as happened with v0.3.8), so a flagged
+      # build is never published.
+      - name: Scan with Microsoft Defender
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $mp = "$env:ProgramFiles\Windows Defender\MpCmdRun.exe"
+          & $mp -SignatureUpdate | Out-Host
+          & $mp -Scan -ScanType 3 -File "$PWD\dist\${{ matrix.asset }}" -DisableRemediation | Out-Host
+          switch ($LASTEXITCODE) {
+            0 { "Microsoft Defender: no threats found." }
+            2 { echo "::error::Microsoft Defender flags this build as malware (see the scan output above). Not publishing it."; exit 1 }
+            default { echo "::warning::Microsoft Defender scan could not run (exit code $LASTEXITCODE)."; exit 0 }
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}

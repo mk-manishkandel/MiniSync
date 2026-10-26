@@ -169,20 +169,15 @@ pub fn open_path(path: &Path) {
     let _ = Command::new("xdg-open").arg(path).spawn();
 }
 
-/// Keeps the computer from going to sleep while files are being transferred
-/// (a laptop otherwise sleeps mid-transfer and the connection drops). The
-/// screen may still turn off. Called about once a second.
+/// Keeps a Mac from going to sleep while files are being transferred (a
+/// laptop otherwise sleeps mid-transfer and the connection drops; the
+/// download resumes after, but much later). The screen may still turn off.
+/// Called about once a second.
+///
+/// Not on Windows: v0.3.8 did it there with SetThreadExecutionState, and
+/// Microsoft Defender's ML model then flagged the app as a trojan
+/// (Bearfoos.A!ml) and quarantined installed copies.
 pub fn keep_awake(busy: bool) {
-    #[cfg(windows)]
-    if busy {
-        #[link(name = "kernel32")]
-        extern "system" {
-            fn SetThreadExecutionState(flags: u32) -> u32;
-        }
-        const ES_SYSTEM_REQUIRED: u32 = 0x1;
-        // Resets the idle-sleep timer, the same as the user touching the mouse.
-        unsafe { SetThreadExecutionState(ES_SYSTEM_REQUIRED) };
-    }
     #[cfg(target_os = "macos")]
     {
         static CAFFEINATE: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
@@ -203,7 +198,7 @@ pub fn keep_awake(busy: bool) {
             }
         }
     }
-    #[cfg(not(any(windows, target_os = "macos")))]
+    #[cfg(not(target_os = "macos"))]
     let _ = busy;
 }
 
