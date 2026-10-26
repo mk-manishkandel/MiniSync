@@ -462,6 +462,13 @@ async fn run(home: Home, listener: std::net::TcpListener, status: Option<Arc<std
         tokio::spawn(async move {
             let mut last = String::new();
             loop {
+                let busy = hub
+                    .status
+                    .lock()
+                    .unwrap()
+                    .values()
+                    .any(|s| matches!(s.state, folder::SyncState::Receiving | folder::SyncState::Sending));
+                service::keep_awake(busy);
                 let json = serde_json::to_string(&*hub.status.lock().unwrap()).unwrap_or_default();
                 if json != last {
                     let tmp = path.with_extension("tmp");

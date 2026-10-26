@@ -13,7 +13,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
@@ -23,7 +23,14 @@ pub const DISCOVERY_PORT: u16 = 21100;
 const DISCOVERY_MAGIC: &[u8; 5] = b"MSYN1";
 const NOISE_CHUNK: usize = 65000;
 const MAX_REQUEST: u32 = 4 * 1024 * 1024;
-const IDLE_TIMEOUT: Duration = Duration::from_secs(180);
+/// A silent connection is dropped after this long. Peers ping every
+/// `PING_EVERY` (older versions every 60s), so a peer that vanished from the
+/// network without closing the connection is noticed within a minute or so.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(75);
+const PING_EVERY: Duration = Duration::from_secs(20);
+/// Two connections to the same peer opened closer together than this were
+/// dialed at the same moment by both sides; see `Hub::register`.
+const SIMULTANEOUS: Duration = Duration::from_secs(10);
 
 pub enum FolderEvent {
     Scan,
@@ -82,6 +89,9 @@ struct Conn {
     initiator: DeviceId,
     tx: mpsc::Sender<Message>,
     pending: Pending,
+    since: Instant,
+    /// Tells the connection to shut down (it was replaced by a newer one).
+    close: Arc<tokio::sync::Notify>,
 }
 
 pub struct Hub {
@@ -252,19 +262,25 @@ impl Hub {
     }
 
     /// Registers a new connection. When both devices dial each other at the same
-    /// time, both keep the connection started by the smaller device id.
-    fn register(&self, peer: DeviceId, initiator: DeviceId, tx: mpsc::Sender<Message>) -> Option<(u64, Pending)> {
+    /// time, both keep the connection started by the smaller device id. An
+    /// older connection is replaced: a device only dials when it has lost the
+    /// connection, so the old one is dead (e.g. Wi-Fi dropped) even if this
+    /// side hasn't noticed yet.
+    fn register(&self, peer: DeviceId, initiator: DeviceId, tx: mpsc::Sender<Message>) -> Option<(u64, Pending, Arc<tokio::sync::Notify>)> {
         let mut conns = self.conns.lock().unwrap();
         if let Some(existing) = conns.get(&peer) {
             let preferred = self.me.min(peer);
-            if existing.initiator == preferred || initiator != preferred {
+            let simultaneous = existing.since.elapsed() < SIMULTANEOUS;
+            if simultaneous && (existing.initiator == preferred || initiator != preferred) {
                 return None;
             }
+            existing.close.notify_one();
         }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let pending: Pending = Arc::default();
-        conns.insert(peer, Conn { id, initiator, tx, pending: pending.clone() });
-        Some((id, pending))
+        let close = Arc::new(tokio::sync::Notify::new());
+        conns.insert(peer, Conn { id, initiator, tx, pending: pending.clone(), since: Instant::now(), close: close.clone() });
+        Some((id, pending, close))
     }
 
     fn unregister(&self, peer: DeviceId, conn_id: u64) -> bool {
@@ -391,7 +407,7 @@ pub async fn run_conn(hub: Arc<Hub>, stream: TcpStream, initiator: bool) {
     }
     let initiator_id = if initiator { hub.me } else { peer };
     let (tx, mut rx) = mpsc::channel::<Message>(256);
-    let Some((conn_id, pending)) = hub.register(peer, initiator_id, tx.clone()) else {
+    let Some((conn_id, pending, close)) = hub.register(peer, initiator_id, tx.clone()) else {
         log::debug!("duplicate connection to {}, dropping", hub.peer_name(&peer));
         return;
     };
@@ -412,7 +428,7 @@ pub async fn run_conn(hub: Arc<Hub>, stream: TcpStream, initiator: bool) {
     let pinger_tx = tx.clone();
     let pinger = tokio::spawn(async move {
         loop {
-            tokio::time::sleep(Duration::from_secs(60)).await;
+            tokio::time::sleep(PING_EVERY).await;
             if pinger_tx.send(Message::Ping).await.is_err() {
                 break;
             }
@@ -430,8 +446,16 @@ pub async fn run_conn(hub: Arc<Hub>, stream: TcpStream, initiator: bool) {
     hub.notify_folders(|| FolderEvent::PeerConnected(peer)).await;
 
     let mut got_hello = false;
+    let mut reason = String::new();
     loop {
-        let msg = match tokio::time::timeout(IDLE_TIMEOUT, recv_msg(&mut r, &noise)).await {
+        let received = tokio::select! {
+            r = tokio::time::timeout(IDLE_TIMEOUT, recv_msg(&mut r, &noise)) => r,
+            _ = close.notified() => {
+                reason = "replaced by a new connection".into();
+                break;
+            }
+        };
+        let msg = match received {
             Ok(Ok(m)) => m,
             Ok(Err(e)) if !got_hello => {
                 if crate::logfile::throttle(&format!("talk-{peer}"), crate::logfile::REPEAT) {
@@ -440,11 +464,11 @@ pub async fn run_conn(hub: Arc<Hub>, stream: TcpStream, initiator: bool) {
                 break;
             }
             Ok(Err(e)) => {
-                log::debug!("read from {name}: {e}");
+                reason = e.to_string();
                 break;
             }
             Err(_) => {
-                log::info!("{name} timed out");
+                reason = format!("no answer for {}s", IDLE_TIMEOUT.as_secs());
                 break;
             }
         };
@@ -496,10 +520,14 @@ pub async fn run_conn(hub: Arc<Hub>, stream: TcpStream, initiator: bool) {
     }
 
     pinger.abort();
+    let reason = if reason.is_empty() { String::new() } else { format!(" ({reason})") };
     if hub.unregister(peer, conn_id) {
-        log::info!("disconnected from {name}");
+        log::info!("disconnected from {name}{reason}");
         pending.lock().unwrap().clear();
         hub.notify_folders(|| FolderEvent::PeerDisconnected(peer)).await;
+    } else {
+        log::info!("closed an old connection to {name}{reason}");
+        pending.lock().unwrap().clear();
     }
     writer.abort();
 }

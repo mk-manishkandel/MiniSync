@@ -11,10 +11,11 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
 const CHUNK: u32 = 1024 * 1024;
@@ -110,6 +111,7 @@ impl Folder {
         if let Err(e) = self.prepare_root() {
             log::error!("[{}] {e:#}", self.id);
         }
+        self.remove_old_parts();
         self.scan().await;
         self.refresh_status();
         let mut pull_tick = tokio::time::interval(Duration::from_secs(60));
@@ -144,6 +146,19 @@ impl Folder {
                 _ = scan_tick.tick() => { self.scan().await; self.pull().await; }
             }
             self.refresh_status();
+        }
+    }
+
+    /// Unfinished downloads are kept so they can resume; one untouched for a
+    /// week is for a file that has since changed, so it is removed.
+    fn remove_old_parts(&self) {
+        let Ok(entries) = std::fs::read_dir(self.root.join(util::TMP_DIR)) else { return };
+        let week = Duration::from_secs(7 * 24 * 3600);
+        for e in entries.flatten() {
+            let old = e.metadata().ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok()).is_some_and(|age| age > week);
+            if old {
+                let _ = std::fs::remove_file(e.path());
+            }
         }
     }
 
@@ -556,7 +571,10 @@ impl Folder {
     }
 
     /// Downloads the whole file into the temp dir, verifies its hash and
-    /// stamps the remote mtime on it. Returns the temp path.
+    /// stamps the remote mtime on it. Returns the temp path. If the connection
+    /// drops, the part already downloaded is kept and the next try continues
+    /// from there (the temp name comes from the content hash, so a part is
+    /// only ever continued with the same content).
     async fn download(&self, peer: DeviceId, r: &FileInfo) -> Result<PathBuf> {
         let tmp_dir = self.root.join(util::TMP_DIR);
         if !tmp_dir.exists() {
@@ -564,14 +582,43 @@ impl Folder {
             hide(&tmp_dir);
         }
         let tmp = tmp_dir.join(format!("{}.part", &util::hex(&r.hash)[..16]));
+        let mut corrupt = false;
         let result = async {
-            let mut file = tokio::fs::File::create(&tmp).await?;
             let mut hasher = Sha256::new();
-            let mut offset = 0u64;
+            let mut offset = std::fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0);
+            if offset > r.size {
+                offset = 0;
+            }
+            let mut file = if offset > 0 {
+                // Re-read what we have so the hash covers the whole file.
+                let (tmp_path, len) = (tmp.clone(), offset);
+                hasher = tokio::task::spawn_blocking(move || -> std::io::Result<Sha256> {
+                    let mut h = Sha256::new();
+                    let mut f = std::fs::File::open(&tmp_path)?.take(len);
+                    let mut buf = vec![0u8; 1 << 20];
+                    loop {
+                        let n = f.read(&mut buf)?;
+                        if n == 0 {
+                            return Ok(h);
+                        }
+                        h.update(&buf[..n]);
+                    }
+                })
+                .await??;
+                log::info!("[{}] resuming {} at {} of {} bytes", self.id, r.name, offset, r.size);
+                let mut f = tokio::fs::OpenOptions::new().write(true).open(&tmp).await?;
+                f.set_len(offset).await?;
+                f.seek(std::io::SeekFrom::Start(offset)).await?;
+                f
+            } else {
+                tokio::fs::File::create(&tmp).await?
+            };
+            self.update_status(|s| s.bytes_done += offset);
             while offset < r.size {
-                let want = CHUNK.min((r.size - offset) as u32);
+                let want = (r.size - offset).min(CHUNK as u64) as u32;
                 let data = self.hub.request(peer, &self.id, &r.name, offset, want).await?;
                 if data.is_empty() {
+                    corrupt = true;
                     bail!("peer's file is shorter than announced (changed while sending?)");
                 }
                 hasher.update(&data);
@@ -584,6 +631,7 @@ impl Folder {
             drop(file);
             let got: [u8; 32] = hasher.finalize().into();
             if got != r.hash || offset != r.size {
+                corrupt = true;
                 bail!("content does not match (file changed on the peer while sending?), will retry");
             }
             let t = filetime::FileTime::from_unix_time(r.mtime, 0);
@@ -592,7 +640,10 @@ impl Folder {
         }
         .await;
         if let Err(e) = result {
-            let _ = std::fs::remove_file(&tmp);
+            // Keep the part after a dropped connection; start over only if it is wrong.
+            if corrupt {
+                let _ = std::fs::remove_file(&tmp);
+            }
             return Err(e);
         }
         Ok(tmp)
