@@ -1,0 +1,46 @@
+# Makes the version in .github/approved-version the "latest" release: the one
+# installed copies update to and the README's download links point at.
+#
+# The release workflow publishes every new version as a pre-release. Approve it
+# (edit .github/approved-version and push) only after its Windows build scans
+# clean with Microsoft Defender on a real PC: GitHub's runners don't run
+# Defender's cloud ML, which flagged v0.3.8 and v0.3.10 as a trojan.
+
+name: Approve release
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/approved-version]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  approve:
+    name: Make the approved version the latest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v=$(tr -d ' \r\n' < .github/approved-version)
+          gh release edit "v$v" --repo "$GITHUB_REPOSITORY" --prerelease=false --latest
+          # Any newer release that is not approved goes back to pre-release,
+          # so no installed copy updates to it.
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,isPrerelease \
+            --jq '.[] | select(.isPrerelease | not) | .tagName' |
+          while read -r tag; do
+            newest=$(printf '%s\n%s\n' "${tag#v}" "$v" | sort -V | tail -1)
+            if [ "${tag#v}" != "$v" ] && [ "$newest" = "${tag#v}" ]; then
+              echo "Hiding $tag (not approved)"
+              gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --prerelease
+            fi
+          done
+          echo "Latest release is now v$v"

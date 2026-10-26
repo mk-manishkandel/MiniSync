@@ -1,6 +1,8 @@
 # Builds, signs and publishes a release whenever main is pushed with a new
-# version number in Cargo.toml. Installed copies of Mini Sync check the latest
-# release every 6 hours and offer the update in their tray menu.
+# version number in Cargo.toml. It is published as a pre-release, which
+# installed copies ignore, until it is approved (see approve.yml). Installed
+# copies check the latest release every 6 hours and offer the update in their
+# tray menu.
 #
 # Needs one repository secret: RELEASE_SIGNING_KEY (see README, "Releasing").
 
@@ -77,9 +79,9 @@ jobs:
         run: |
           mkdir dist
           cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "dist/${{ matrix.asset }}"
-      # A false positive here makes Defender quarantine the installed app on
-      # every PC that auto-updates (as happened with v0.3.8), so a flagged
-      # build is never published.
+      # Catches signature-based detections. Defender's cloud ML (which flagged
+      # v0.3.8 and v0.3.10) does not run here, so releases are still published
+      # as pre-releases and approved by hand; see approve.yml.
       - name: Scan with Microsoft Defender
         if: runner.os == 'Windows'
         shell: pwsh
@@ -150,4 +152,6 @@ jobs:
             --target "$GITHUB_SHA" \
             --title "Mini Sync v$v" \
             --notes-file notes.md \
-            --generate-notes
+            --generate-notes \
+            --prerelease
+          echo "Published v$v as a pre-release. Scan the Windows build with Microsoft Defender on a real PC, then approve it in .github/approved-version (see approve.yml)."
