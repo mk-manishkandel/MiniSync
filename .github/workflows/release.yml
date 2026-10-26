@@ -92,7 +92,7 @@ jobs:
             2 { echo "::error::Microsoft Defender flags this build as malware (see the scan output above). Not publishing it."; exit 1 }
             default { echo "::warning::Microsoft Defender scan could not run (exit code $LASTEXITCODE)."; exit 0 }
           }
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.asset }}
           path: dist/${{ matrix.asset }}
@@ -104,7 +104,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           path: dist
           merge-multiple: true
